@@ -22,6 +22,8 @@ from typing import Dict, List, Sequence, Tuple  # For precise type annotations
 import numpy as np      # Numerical computations and array handling
 import pandas as pd     # Data manipulation with tables (DataFrames)
 import anndata as ad    # Data structure specialized for single-cell data (rows=cells, cols=genes)
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # High-level API to query the CellxGene Census dataset without downloading all data
 import cellxgene_census
@@ -389,7 +391,84 @@ def train_random_forest(
 
     return clf
 
+def plot_top_pairs(
+    model,
+    X,
+    y_true,
+    feature_names,
+    save_file_name,
+    top_n=5,
+    sample=1000,
+    save_dir=None,
+    prefix="",
+    log_transform=False,
+):
+    """
+    Create pairwise scatter plots of the top_n most important genes to visualize clustering.
 
+    Parameters:
+        model: Trained RandomForestClassifier (must have feature_importances_)
+        X: Feature matrix (numpy array or DataFrame)
+        y_true: Labels (list/array of cell types)
+        feature_names: List of gene names corresponding to X columns
+        top_n: Number of most important features to plot
+        sample: Downsample number of points for readability
+        save_dir: Directory to save plots (if None, just show them)
+        prefix: Filename prefix if saving plots
+        log_transform: If True, apply log scaling to features before plotting
+                       (safe with zeros using log1p).
+    """
+
+    # Ensure X is DataFrame for easier handling
+    if not isinstance(X, pd.DataFrame):
+        X = pd.DataFrame(X, columns=feature_names)
+
+    # Feature importances from the model
+    importances = model.feature_importances_
+    top_idx = np.argsort(importances)[::-1][:top_n]
+    top_features = [feature_names[i] for i in top_idx]
+
+    # Subset to the most important features
+    df = X[top_features].copy()
+    df["true_label"] = y_true
+
+    # Apply log transform if requested
+    if log_transform:
+        for f in top_features:
+            df[f] = np.log1p(df[f])  # log1p = log(1+x), safe for zero
+        print("[INFO] Applied log1p transform to feature values.")
+
+    # Downsample if dataset is very large
+    if len(df) > sample:
+        df = df.sample(sample, random_state=42)
+
+    # Fixed palette for consistency across plots
+    fixed_palette = {"pancreatic A cell": "green", "type B pancreatic cell": "orange", "pancreatic D cell": "blue"}
+
+    # Plot using Seaborn pairplot
+    g = sns.pairplot(
+        df,
+        vars=top_features,
+        hue="true_label",
+        diag_kind="kde",
+        plot_kws=dict(alpha=0.6, s=30),  # s=point size
+        diag_kws=dict(fill=True)
+    )
+
+    g.fig.suptitle(
+        f"Pairwise plots of top {top_n} features",
+        fontsize=16,
+        y=1.02
+    )
+
+    # Save or show the figure
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, save_file_name)
+        g.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"[INFO] Saved plot to {save_path}")
+    else:
+        plt.show()
 def save_model(model: RandomForestClassifier, feature_order: Sequence[str], path: str) -> None:
     """
     Save the trained model and the expected feature order to disk.
@@ -525,23 +604,50 @@ def run_pipeline(
         # Step 7: Train Random Forest classifier on human training data
         clf = train_random_forest(X_train, y_train, random_state=random_state)
 
-        print("[INFO] Training complete. Evaluating on mouse test data...")
+        # Validate clustering visually with top genes
+        plot_top_pairs(
+            model=clf,
+            X=X_train,
+            y_true=y_train,
+            feature_names=CANONICAL_GENES,
+            save_file_name="train_pairplot.png",
+            top_n=3,          # You only have 3 canonical genes now
+            sample=1000,      # Downsample if dataset is large
+            save_dir="plots/train", # Optional: save figures
+            prefix="train",   # Optional: naming prefix for saved plots
+            log_transform=True  # Apply log transform for better visualization
+        )
+        
+        plot_top_pairs(
+            model=clf,
+            X=X_test,
+            y_true=y_test,
+            feature_names=CANONICAL_GENES,
+            save_file_name="test_pairplot.png",
+            top_n=3,
+            sample=1000,
+            save_dir="plots/test",
+            prefix="test",
+            log_transform=True  # Apply log transform for better visualization
+        )
 
-        # Step 8: Predict cell types on mouse test data
-        y_pred = clf.predict(X_test)
+        # print("[INFO] Training complete. Evaluating on mouse test data...")
 
-        # Step 9: Print classification report to evaluate model performance
-        print(classification_report(y_test, y_pred, digits=3))
+        # # Step 8: Predict cell types on mouse test data
+        # y_pred = clf.predict(X_test)
 
-        # Step 10: Save the trained model to disk
-        save_model(clf, feature_order=CANONICAL_GENES, path=model_path)
+        # # Step 9: Print classification report to evaluate model performance
+        # print(classification_report(y_test, y_pred, digits=3))
 
-        # Step 11: Load the saved model (to test persistence and reload)
-        clf_loaded, loaded_feature_order = load_model(model_path)
+        # # Step 10: Save the trained model to disk
+        # save_model(clf, feature_order=CANONICAL_GENES, path=model_path)
 
-        # Step 12: Demo predictions on first few test samples
-        demo_predictions = clf_loaded.predict(X_test[:n_demo])
-        print(f"[INFO] Demo predictions for first {n_demo} mouse cells: {demo_predictions}")
+        # # Step 11: Load the saved model (to test persistence and reload)
+        # clf_loaded, loaded_feature_order = load_model(model_path)
+
+        # # Step 12: Demo predictions on first few test samples
+        # demo_predictions = clf_loaded.predict(X_test[:n_demo])
+        # print(f"[INFO] Demo predictions for first {n_demo} mouse cells: {demo_predictions}")
 
 
 # =========================
