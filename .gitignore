@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Conda environments
+.conda/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Output (data, model artifacts, plots)
+output/
+
+# Legacy model artifact
+model.joblib
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# H5AD data files
+*.h5ad
