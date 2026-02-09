@@ -8,34 +8,58 @@ CellClassifier is a Python ML/bioinformatics project for classifying pancreatic 
 
 ## Environment Setup
 
-- **Python 3.12** managed via Conda (`.conda/` directory)
-- No `requirements.txt` exists. Key dependencies: `scanpy`, `anndata`, `pandas`, `numpy`, `scikit-learn`, `matplotlib`, `seaborn`, `cellxgene-census`, `scipy`, `h5py`, `joblib`
-- The notebook (`download_pdac_data.ipynb`) installs deps inline with `pip install`
+- **Python 3.12** managed via Conda (`cellclassifier` environment)
+- Dependencies listed in `requirements.txt`. Install with: `pip install -r requirements.txt`
+- Key dependencies: `scanpy`, `anndata`, `pandas`, `numpy`, `scikit-learn`, `matplotlib`, `seaborn`, `scipy`, `h5py`, `joblib`, `gdown`
 
 ## Running
 
-- **Main training script:** `python RFMouseHumanV2.py` — connects to cellxGene Census API, trains RandomForestClassifier on pancreatic cell types. This was originally a test file to practice working with CellxGene data and Random Forest Classifiers.
-- **PDAC notebook:** `download_pdac_data.ipynb` — full pipeline from data loading through model training and visualization (designed for Google Colab). This is the currently the most up to date code.
-- **Dendrogram script:** `python DendrogramPlot.py` — hierarchical clustering visualization (incomplete)
+**Main CLI script (recommended):**
+```bash
+# First run — download from Google Drive, train, evaluate, plot:
+python run.py --gdrive-id <GOOGLE_DRIVE_FILE_ID> --output ./output
+
+# Run with local H5AD file:
+python run.py --data ./data/pdac.h5ad --output ./output
+
+# Load existing model (skip training):
+python run.py --data ./data/pdac.h5ad --model ./output/model_artifact.joblib
+
+# Force retrain on new data:
+python run.py --data ./data/new.h5ad --retrain --output ./results_v2
+```
+
+**Legacy files (kept for reference):**
+- `download_pdac_data.ipynb` — original Colab notebook (superseded by `run.py`)
+- `RFMouseHumanV2.py` — test script for cellxGene Census API
+- `DendrogramPlot.py` — incomplete dendrogram visualization
 
 ## Architecture
 
-The project follows a standard ML pipeline, implemented across two main files:
+The project is a Python package (`cellclassifier/`) with a CLI entry point (`run.py`):
 
-**`RFMouseHumanV2.py`** — Fetches pancreatic cell data (alpha/beta/delta) from the CZI cellxGene Census API, preprocesses with scanpy (normalize → log-transform → HVG filtering → PCA), and trains a RandomForestClassifier. Steps 7-10 are incomplete stubs. This was a test file to practice working with CellxGene data and Random Forest Classifiers. It is not important.
+```
+cellclassifier/
+├── __init__.py      # Package marker
+├── data.py          # Data loading (local + Google Drive), preprocessing, train/test split
+├── model.py         # RF training, evaluation, feature importances, save/load artifacts
+├── analysis.py      # Differential expression: avg expression, ratios, top genes
+└── plotting.py      # UMAP plots, feature importance bar charts
+run.py               # CLI entry point — orchestrates the full pipeline
+```
 
-**`download_pdac_data.ipynb`** — This is the most up-to-date code. Complete pipeline for PDAC classification:
-1. Loads a 57,423-cell × 2,033-gene H5AD dataset from Google Drive
-2. Encodes condition labels ('N' normal / 'T' tumor) → binary
-3. 80/20 stratified train/test split
-4. RandomForestClassifier with balanced class weights
-5. Feature importance extraction → top discriminating genes
-6. UMAP visualization by cell type, condition, and gene expression
-7. Differential expression analysis identifying biomarkers (CFHR1, RBP2, etc.)
+**Pipeline flow (run.py):**
+1. Load H5AD data (local path or download from Google Drive via `gdown`)
+2. Extract dense expression matrix + encode condition labels
+3. Train RandomForestClassifier (or load existing model artifact)
+4. Evaluate on test set (classification report + confusion matrix)
+5. Extract feature importances → top discriminating genes
+6. Differential expression analysis (normal vs tumor expression ratios)
+7. Generate UMAP and feature importance plots → saved as PNGs
 
 **Data format:** AnnData (`.h5ad`) — `X` matrix holds gene expression, `obs` holds cell metadata (cell type, condition), `var` holds gene info.
 
-**Model artifact:** `model.joblib` — serialized trained RandomForestClassifier, loadable with `joblib.load()`.
+**Model artifact:** `model_artifact.joblib` — bundles the trained RandomForestClassifier, LabelEncoder, and gene names list in a single dict. Load with `cellclassifier.model.load_artifact()`.
 
 ## Key Domain Concepts
 
