@@ -240,11 +240,11 @@ These genes represent potential therapeutic targets or diagnostic biomarkers for
 **Issue**: Google Drive download fails
 - **Solution**: Ensure the file is publicly shared and the ID is correct
 
-## Contributing
+<!-- ## Contributing
 
-Contributions are welcome! Please ensure code follows the project structure and includes appropriate documentation.
+Contributions are welcome! Please ensure code follows the project structure and includes appropriate documentation. -->
 
-## License
+<!-- ## License
 
 [Add your license here]
 
@@ -258,4 +258,4 @@ If you use CellClassifier in your research, please cite:
 
 ## Contact
 
-[Add contact information or link to issues page]
+[Add contact information or link to issues page] -->
