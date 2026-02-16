@@ -3,16 +3,16 @@ CellClassifier CLI — PDAC cell condition classification from scRNA-seq data.
 
 Usage examples:
     # First run: download from Google Drive, train model, generate plots
-    python run.py --gdrive-id YOUR_FILE_ID --output ./results
+    python run.py --gdrive-id YOUR_FILE_ID --output ./output
 
     # Run with local data file
-    python run.py --data ./data/pdac.h5ad --output ./results
+    python run.py --data ./data/pdac.h5ad --output ./output
 
     # Load existing model (skip training), regenerate plots
-    python run.py --data ./data/pdac.h5ad --model ./results/model_artifact.joblib
+    python run.py --data ./data/pdac.h5ad --model ./output/model_artifact.joblib
 
     # Force retrain on new data
-    python run.py --data ./data/new_pdac.h5ad --output ./results_v2 --retrain
+    python run.py --data ./data/new_pdac.h5ad --output ./output_v2 --retrain
 """
 
 import argparse

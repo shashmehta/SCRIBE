@@ -75,11 +75,45 @@ python run.py [OPTIONS]
 | `--model PATH` | Load existing model (skip training) | None |
 | `--retrain` | Force retrain even if model exists | False |
 
+### Getting Your Google Drive File ID
+
+If you have data stored on Google Drive, you'll need to extract the file ID from the sharing link.
+
+**Step 1: Share your file**
+1. Right-click your `.h5ad` file in Google Drive
+2. Click "Share" → "Get link"
+3. Set access to **"Anyone with the link"** and **"Viewer"**
+4. Copy the link
+
+**Step 2: Extract the file ID**
+
+Your Google Drive link will look like one of these formats:
+
+```
+https://drive.google.com/file/d/1abc123XYZ456def789/view?usp=sharing
+                              ↑─────────────────↑
+                                 This is your FILE ID
+```
+
+Or:
+```
+https://drive.google.com/open?id=1abc123XYZ456def789
+                                 ↑─────────────────↑
+                                    FILE ID
+```
+
+**Example:**
+- Link: `https://drive.google.com/file/d/1abc123XYZ456def789/view?usp=sharing`
+- File ID: `1abc123XYZ456def789`
+- Command: `python run.py --gdrive-id 1abc123XYZ456def789 --output ./output`
+
+> **⚠️ Important:** The file must be shared with "Anyone with the link can view" permissions for the download to work.
+
 ### Examples
 
 **First run with Google Drive data:**
 ```bash
-python run.py --gdrive-id 1abc123xyz --output ./results
+python run.py --gdrive-id 1abc123xyz --output ./output
 ```
 This will:
 - Download the dataset from Google Drive
@@ -90,13 +124,13 @@ This will:
 
 **Reuse trained model:**
 ```bash
-python run.py --data ./results/data/pdac_data.h5ad --model ./results/model_artifact.joblib
+python run.py --data ./output/data/pdac_data.h5ad --model ./output/model_artifact.joblib
 ```
 This will load the existing model and skip training.
 
 **Retrain on new data:**
 ```bash
-python run.py --data ./new_data/pdac_updated.h5ad --retrain --output ./results_v2
+python run.py --data ./new_data/pdac_updated.h5ad --retrain --output ./output_v2
 ```
 
 ## How It Works
