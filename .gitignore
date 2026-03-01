@@ -20,3 +20,6 @@ model.joblib
 
 # H5AD data files
 *.h5ad
+
+# Private documentation (local reference only)
+docs/
