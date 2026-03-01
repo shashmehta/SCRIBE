@@ -1,0 +1,87 @@
+id: GSE154778
+title: "Primary vs Metastatic PDAC"
+description: >
+  10 primary tumors and 6 metastatic PDAC samples profiled by scRNA-seq.
+  Primary file is a combined DGE CSV matrix; per-sample 10x files are also
+  available in GSE154778_RAW.tar for finer sample demultiplexing.
+
+source:
+  type: local
+  base_path: "/Users/shash/Library/CloudStorage/GoogleDrive-shashvatsmehta@gmail.com/.shortcut-targets-by-id/1m6XoSPhIWcxsfR8TAwcwAbQMXWcFQw6l/ShashvatHighSchoolCollege/2025ResearchExternship/Datasets"
+
+# Primary strategy: combined CSV DGE matrix (genes × cells, gzipped).
+# Fallback: uncomment the tar_10x entry and comment out csv_dge if per-sample
+# metadata cannot be extracted from barcode names alone.
+files:
+  - format: csv_dge
+    relative_path: "GSE154778/GSE154778_dgeMtx.csv.gz"
+  # - format: tar_10x
+  #   relative_path: "GSE154778/GSE154778_RAW.tar"
+
+preprocessing:
+  min_genes: 200
+  min_cells: 3
+  mt_pct_threshold: 20.0
+  n_top_genes: 2000
+  n_pcs: 30
+  leiden_resolution: 0.5
+
+cellxgene:
+  assay_ontology_term_id: "EFO:0009922"      # 10x 3' v2
+  disease_ontology_term_id: "MONDO:0006047"  # pancreatic ductal adenocarcinoma
+  tissue_ontology_term_id: "UBERON:0001264"  # pancreas
+  organism_ontology_term_id: "NCBITaxon:9606"
+
+# Sample metadata: barcode prefixes must be confirmed by inspecting the loaded
+# data (run convert with no samples list first, print barcode patterns, then
+# fill in the id/condition/barcode_suffix values below).
+# TODO: replace placeholder IDs with actual sample identifiers from GEO.
+samples:
+  - id: "Primary_T1"
+    condition: "primary"
+    barcode_suffix: null   # set once barcode pattern is known
+  - id: "Primary_T2"
+    condition: "primary"
+    barcode_suffix: null
+  - id: "Primary_T3"
+    condition: "primary"
+    barcode_suffix: null
+  - id: "Primary_T4"
+    condition: "primary"
+    barcode_suffix: null
+  - id: "Primary_T5"
+    condition: "primary"
+    barcode_suffix: null
+  - id: "Primary_T6"
+    condition: "primary"
+    barcode_suffix: null
+  - id: "Primary_T7"
+    condition: "primary"
+    barcode_suffix: null
+  - id: "Primary_T8"
+    condition: "primary"
+    barcode_suffix: null
+  - id: "Primary_T9"
+    condition: "primary"
+    barcode_suffix: null
+  - id: "Primary_T10"
+    condition: "primary"
+    barcode_suffix: null
+  - id: "Metastatic_T1"
+    condition: "metastatic"
+    barcode_suffix: null
+  - id: "Metastatic_T2"
+    condition: "metastatic"
+    barcode_suffix: null
+  - id: "Metastatic_T3"
+    condition: "metastatic"
+    barcode_suffix: null
+  - id: "Metastatic_T4"
+    condition: "metastatic"
+    barcode_suffix: null
+  - id: "Metastatic_T5"
+    condition: "metastatic"
+    barcode_suffix: null
+  - id: "Metastatic_T6"
+    condition: "metastatic"
+    barcode_suffix: null
