@@ -1,15 +1,24 @@
 """Click CLI entry point for CellClassifier."""
 
+import os
+from pathlib import Path
+
 import click
 
 from cellclassifier.config import load_dataset_config, load_pipeline_config
 from cellclassifier import geo
+from cellclassifier import data as celldata
+from cellclassifier import model as cellmodel
+from cellclassifier import analysis as cellanal
+from cellclassifier import plotting
 
 
 @click.group()
 def cli():
     """CellClassifier: classify pancreatic cell conditions from scRNA-seq data."""
 
+
+# ── convert ───────────────────────────────────────────────────────────────────
 
 @cli.command()
 @click.option(
@@ -21,7 +30,7 @@ def cli():
     "--output",
     type=click.Path(file_okay=False),
     default=None,
-    help="Output directory for the .h5ad file. Overrides source.base_path default.",
+    help="Output directory for the .h5ad file. Overrides config default.",
 )
 def convert(config, output):
     """Convert a GEO dataset to a cellxGene-compliant .h5ad file.
@@ -39,6 +48,8 @@ def convert(config, output):
     geo.convert_dataset(cfg, out_dir)
 
 
+# ── train ─────────────────────────────────────────────────────────────────────
+
 @cli.command()
 @click.option(
     "--config", required=True,
@@ -46,7 +57,7 @@ def convert(config, output):
     help="Pipeline YAML config (e.g. configs/pipeline.yaml).",
 )
 @click.option(
-    "--data",
+    "--data", "data_path",
     type=click.Path(exists=True, dir_okay=False),
     default=None,
     help="Path to processed .h5ad. Overrides config value.",
@@ -57,7 +68,7 @@ def convert(config, output):
     default=None,
     help="Output directory. Overrides config value.",
 )
-def train(config, data, output):
+def train(config, data_path, output):
     """Train a RandomForest classifier on processed scRNA-seq data.
 
     Loads the .h5ad specified in the pipeline config (or --data override),
@@ -68,14 +79,40 @@ def train(config, data, output):
     Example:
 
         python run.py train --config configs/pipeline.yaml
+        python run.py train --config configs/pipeline.yaml --data ./output/GSE162708_processed.h5ad
     """
     cfg = load_pipeline_config(config)
-    data_path = data or cfg.data
+    h5ad_path = data_path or cfg.data
     out_dir = output or cfg.output
-    click.echo(f"Training on {data_path} → {out_dir}")
-    click.echo(f"  n_estimators={cfg.model.n_estimators}, test_size={cfg.model.test_size}")
-    raise NotImplementedError("model.train() will be wired in stage 4")
+    os.makedirs(out_dir, exist_ok=True)
 
+    click.echo("\n=== Loading Data ===")
+    adata = celldata.load_adata(h5ad_path, condition_col=cfg.condition_col)
+
+    click.echo("\n=== Extracting Features ===")
+    X, y, label_encoder, gene_names = celldata.extract_features_and_labels(
+        adata, condition_col=cfg.condition_col
+    )
+    X_train, X_test, y_train, y_test = celldata.split_data(
+        X, y, test_size=cfg.model.test_size, random_state=cfg.model.random_state
+    )
+
+    click.echo("\n=== Training Model ===")
+    clf = cellmodel.train(
+        X_train, y_train,
+        n_estimators=cfg.model.n_estimators,
+        class_weight=cfg.model.class_weight,
+        random_state=cfg.model.random_state,
+    )
+
+    click.echo("\n=== Evaluating Model ===")
+    cellmodel.evaluate(clf, X_test, y_test, label_encoder)
+
+    artifact_path = os.path.join(out_dir, "model_artifact.joblib")
+    cellmodel.save_artifact(artifact_path, clf, label_encoder, gene_names)
+
+
+# ── evaluate ──────────────────────────────────────────────────────────────────
 
 @cli.command()
 @click.option(
@@ -89,15 +126,16 @@ def train(config, data, output):
     help="Path to a saved model_artifact.joblib.",
 )
 @click.option(
-    "--data",
+    "--data", "data_path",
     type=click.Path(exists=True, dir_okay=False),
     default=None,
     help="Path to processed .h5ad. Overrides config value.",
 )
-def evaluate(config, model_path, data):
+def evaluate(config, model_path, data_path):
     """Evaluate a saved model artifact on processed scRNA-seq data.
 
-    Prints a classification report and confusion matrix to stdout.
+    Loads the model artifact and runs it against the full dataset,
+    printing a classification report and confusion matrix to stdout.
 
     Example:
 
@@ -105,10 +143,24 @@ def evaluate(config, model_path, data):
             --model ./output/model_artifact.joblib
     """
     cfg = load_pipeline_config(config)
-    data_path = data or cfg.data
-    click.echo(f"Evaluating {model_path} on {data_path}")
-    raise NotImplementedError("model.evaluate() will be wired in stage 4")
+    h5ad_path = data_path or cfg.data
 
+    click.echo("\n=== Loading Data ===")
+    adata = celldata.load_adata(h5ad_path, condition_col=cfg.condition_col)
+
+    click.echo("\n=== Extracting Features ===")
+    X, y, label_encoder, gene_names = celldata.extract_features_and_labels(
+        adata, condition_col=cfg.condition_col
+    )
+
+    click.echo("\n=== Loading Model ===")
+    clf, label_encoder, gene_names = cellmodel.load_artifact(model_path)
+
+    click.echo("\n=== Evaluation Results ===")
+    cellmodel.evaluate(clf, X, y, label_encoder)
+
+
+# ── plot ──────────────────────────────────────────────────────────────────────
 
 @cli.command()
 @click.option(
@@ -130,8 +182,8 @@ def evaluate(config, model_path, data):
 def plot(config, model_path, output):
     """Generate UMAP and feature-importance plots.
 
-    Reads UMAP embedding from the .h5ad and feature importances from the model
-    artifact, then writes PNG files to <output>/plots/.
+    Reads UMAP embedding from the .h5ad and feature importances from the
+    model artifact, then writes PNG files to <output>/plots/.
 
     Example:
 
@@ -140,9 +192,27 @@ def plot(config, model_path, output):
     """
     cfg = load_pipeline_config(config)
     out_dir = output or cfg.output
-    click.echo(f"Plotting → {out_dir}/plots/")
-    raise NotImplementedError("plotting.generate_all_plots() will be wired in stage 4")
 
+    click.echo("\n=== Loading Data ===")
+    adata = celldata.load_adata(cfg.data, condition_col=cfg.condition_col)
+
+    click.echo("\n=== Loading Model ===")
+    clf, label_encoder, gene_names = cellmodel.load_artifact(model_path)
+
+    click.echo("\n=== Feature Importances ===")
+    importances = cellmodel.get_feature_importances(
+        clf, gene_names, top_n=cfg.analysis.top_n_genes
+    )
+
+    click.echo("\n=== Generating Plots ===")
+    plotting.generate_all_plots(
+        adata, importances, out_dir,
+        umap_color_columns=cfg.plots.umap_columns,
+        umap_genes=cfg.plots.umap_genes,
+    )
+
+
+# ── run (full pipeline) ───────────────────────────────────────────────────────
 
 @cli.command("run")
 @click.option(
@@ -155,7 +225,7 @@ def plot(config, model_path, output):
     help="Force retraining even if a model artifact already exists.",
 )
 @click.option(
-    "--data",
+    "--data", "data_path",
     type=click.Path(exists=True, dir_okay=False),
     default=None,
     help="Path to processed .h5ad. Overrides config value.",
@@ -166,11 +236,12 @@ def plot(config, model_path, output):
     default=None,
     help="Output directory. Overrides config value.",
 )
-def run_pipeline(config, retrain, data, output):
+def run_pipeline(config, retrain, data_path, output):
     """Full pipeline: train → evaluate → plot.
 
     Combines the train, evaluate, and plot subcommands into one step.
-    Equivalent to the original run.py behaviour but driven by a YAML config.
+    Skips training if model_artifact.joblib already exists in the output
+    directory, unless --retrain is passed.
 
     Example:
 
@@ -178,10 +249,67 @@ def run_pipeline(config, retrain, data, output):
         python run.py run --config configs/pipeline.yaml --retrain
     """
     cfg = load_pipeline_config(config)
-    data_path = data or cfg.data
+    h5ad_path = data_path or cfg.data
     out_dir = output or cfg.output
-    click.echo(f"Full pipeline: {data_path} → {out_dir} (retrain={retrain})")
-    raise NotImplementedError("Full pipeline will be wired in stage 4")
+    os.makedirs(out_dir, exist_ok=True)
+
+    artifact_path = os.path.join(out_dir, "model_artifact.joblib")
+
+    # ── Step 1: Load data ────────────────────────────────────────────────────
+    click.echo("\n=== Loading Data ===")
+    adata = celldata.load_adata(h5ad_path, condition_col=cfg.condition_col)
+
+    click.echo("\n=== Extracting Features ===")
+    X, y, label_encoder, gene_names = celldata.extract_features_and_labels(
+        adata, condition_col=cfg.condition_col
+    )
+
+    # ── Step 2: Train or load model ──────────────────────────────────────────
+    should_train = retrain or not Path(artifact_path).exists()
+
+    if should_train:
+        click.echo("\n=== Training Model ===")
+        X_train, X_test, y_train, y_test = celldata.split_data(
+            X, y, test_size=cfg.model.test_size, random_state=cfg.model.random_state
+        )
+        clf = cellmodel.train(
+            X_train, y_train,
+            n_estimators=cfg.model.n_estimators,
+            class_weight=cfg.model.class_weight,
+            random_state=cfg.model.random_state,
+        )
+        click.echo("\n=== Evaluating Model ===")
+        cellmodel.evaluate(clf, X_test, y_test, label_encoder)
+        cellmodel.save_artifact(artifact_path, clf, label_encoder, gene_names)
+    else:
+        click.echo(f"\n=== Loading Existing Model ({artifact_path}) ===")
+        clf, label_encoder, gene_names = cellmodel.load_artifact(artifact_path)
+
+    # ── Step 3: Feature importances ──────────────────────────────────────────
+    click.echo("\n=== Feature Importances ===")
+    importances = cellmodel.get_feature_importances(
+        clf, gene_names, top_n=cfg.analysis.top_n_genes
+    )
+
+    # ── Step 4: Differential expression ─────────────────────────────────────
+    click.echo("\n=== Differential Expression Analysis ===")
+    avg_expr = cellanal.avg_expression_by_condition(adata, condition_col=cfg.condition_col)
+    conditions = list(avg_expr.keys())
+    if len(conditions) >= 2:
+        ratio = cellanal.compute_expression_ratio(
+            avg_expr, numerator=conditions[0], denominator=conditions[1]
+        )
+        cellanal.top_differential_genes(ratio, top_n=cfg.analysis.top_n_genes)
+
+    # ── Step 5: Plots ────────────────────────────────────────────────────────
+    click.echo("\n=== Generating Plots ===")
+    plotting.generate_all_plots(
+        adata, importances, out_dir,
+        umap_color_columns=cfg.plots.umap_columns,
+        umap_genes=cfg.plots.umap_genes,
+    )
+
+    click.echo("\nDone!")
 
 
 def main():
