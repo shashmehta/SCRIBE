@@ -3,6 +3,7 @@
 import click
 
 from cellclassifier.config import load_dataset_config, load_pipeline_config
+from cellclassifier import geo
 
 
 @click.group()
@@ -35,11 +36,7 @@ def convert(config, output):
     """
     cfg = load_dataset_config(config)
     out_dir = output or "./output"
-    click.echo(f"Converting {cfg.id}: {cfg.title}")
-    click.echo(f"  Format : {cfg.files[0].format}")
-    click.echo(f"  Samples: {len(cfg.samples)}")
-    click.echo(f"  Output : {out_dir}")
-    raise NotImplementedError("geo.convert_dataset() will be wired in stage 3")
+    geo.convert_dataset(cfg, out_dir)
 
 
 @cli.command()
