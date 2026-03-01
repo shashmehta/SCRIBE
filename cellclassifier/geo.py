@@ -1,4 +1,11 @@
-"""GEO dataset loading and conversion to cellxGene-compliant AnnData."""
+"""GEO dataset loading and conversion to cellxGene-compliant AnnData.
+
+GEO (Gene Expression Omnibus) is the public database where researchers deposit
+their sequencing data. Each study has a GSE accession (the whole dataset) and
+individual samples have GSM accessions. This module downloads nothing — it
+expects the files to already be on disk (or Google Drive) and converts them
+into the AnnData format used by the rest of the project.
+"""
 
 from __future__ import annotations
 
@@ -23,13 +30,20 @@ from cellclassifier.config import (
     SampleConfig,
 )
 
+# Suppress unimportant deprecation warnings from third-party libraries
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 # ── Loaders ───────────────────────────────────────────────────────────────────
+# Each loader handles one raw file format and returns an AnnData object.
+# AnnData is a standard single-cell data container: rows = cells, columns = genes.
 
 def load_csv_dge(path: str) -> ad.AnnData:
     """Load a gzipped CSV DGE matrix (genes × cells) and return AnnData (cells × genes).
+
+    A DGE (Digital Gene Expression) matrix lists how many times each gene was
+    detected in each cell. The file has genes as rows and cells as columns, but
+    AnnData expects the opposite, so we transpose it.
 
     Args:
         path: Path to the .csv or .csv.gz file.
@@ -38,13 +52,15 @@ def load_csv_dge(path: str) -> ad.AnnData:
         AnnData with cells as observations and genes as variables.
     """
     print(f"Loading CSV DGE: {path}")
+    # read_csv loads the file; index_col=0 makes the first column the row labels (gene names)
     dge = pd.read_csv(path, index_col=0)
     print(f"  Raw shape (genes × cells): {dge.shape}")
 
     adata = ad.AnnData(
-        X=sp.csr_matrix(dge.values.T),
-        obs=pd.DataFrame(index=dge.columns),
-        var=pd.DataFrame(index=dge.index),
+        X=sp.csr_matrix(dge.values.T),        # .T transposes genes×cells → cells×genes
+                                               # csr_matrix stores only non-zero values (sparse)
+        obs=pd.DataFrame(index=dge.columns),   # cell barcodes become row labels
+        var=pd.DataFrame(index=dge.index),     # gene names become column labels
     )
     print(f"  AnnData: {adata.n_obs} cells × {adata.n_vars} genes")
     return adata
@@ -53,9 +69,10 @@ def load_csv_dge(path: str) -> ad.AnnData:
 def load_10x_mtx(src_dir: str, name_prefix: str = "") -> ad.AnnData:
     """Load a 10x MTX dataset, remapping GSE-prefixed filenames if needed.
 
-    If name_prefix is set (e.g. "GSE162708_"), the three component files
-    are symlinked under standard names (barcodes.tsv.gz, features.tsv.gz,
-    matrix.mtx.gz) in a temp directory before loading.
+    10x Chromium sequencing produces three files: barcodes.tsv.gz (cell IDs),
+    features.tsv.gz (gene names), and matrix.mtx.gz (the counts). GEO adds a
+    dataset prefix to these filenames (e.g. "GSE162708_barcodes.tsv.gz"), so
+    we temporarily create symlinks with the standard names before loading.
 
     Args:
         src_dir: Directory containing the 10x files.
@@ -67,6 +84,7 @@ def load_10x_mtx(src_dir: str, name_prefix: str = "") -> ad.AnnData:
     print(f"Loading 10x MTX: {src_dir}")
 
     if name_prefix:
+        # Create a temporary directory with standardly-named symlinks
         tmpdir = tempfile.mkdtemp(prefix="10x_mtx_")
         try:
             standard_names = ["barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz"]
@@ -74,9 +92,10 @@ def load_10x_mtx(src_dir: str, name_prefix: str = "") -> ad.AnnData:
                 src = os.path.join(src_dir, name_prefix + std_name)
                 dst = os.path.join(tmpdir, std_name)
                 if os.path.exists(src):
+                    # symlink = a pointer to the original file, not a copy
                     os.symlink(src, dst)
                 else:
-                    # Try genes.tsv.gz as fallback for older 10x format
+                    # Older 10x format used "genes.tsv.gz" instead of "features.tsv.gz"
                     alt = src.replace("features.tsv.gz", "genes.tsv.gz")
                     if std_name == "features.tsv.gz" and os.path.exists(alt):
                         os.symlink(alt, dst)
@@ -84,8 +103,9 @@ def load_10x_mtx(src_dir: str, name_prefix: str = "") -> ad.AnnData:
                         raise FileNotFoundError(f"Expected file not found: {src}")
             adata = sc.read_10x_mtx(tmpdir, var_names="gene_symbols", make_unique=True)
         finally:
-            shutil.rmtree(tmpdir)
+            shutil.rmtree(tmpdir)  # always clean up the temp dir, even if loading fails
     else:
+        # Files already have standard names — load directly
         adata = sc.read_10x_mtx(src_dir, var_names="gene_symbols", make_unique=True)
 
     print(f"  AnnData: {adata.n_obs} cells × {adata.n_vars} genes")
@@ -95,9 +115,9 @@ def load_10x_mtx(src_dir: str, name_prefix: str = "") -> ad.AnnData:
 def load_tar_txt_dge(tar_path: str) -> ad.AnnData:
     """Extract a TAR of per-sample TXT DGE matrices and concatenate into AnnData.
 
-    Each TXT file is expected to be tab-separated with genes as rows and cells
-    as columns (standard DGE convention). The GSM accession is extracted from
-    the filename prefix and stored in obs['gsm_id'].
+    A TAR file is like a zip — it bundles multiple files together. Here each
+    file inside the TAR is a tab-separated DGE matrix for one sample. We extract
+    them, load each one, and merge them into a single AnnData.
 
     Args:
         tar_path: Path to the .tar file containing TXT DGE matrices.
@@ -106,18 +126,20 @@ def load_tar_txt_dge(tar_path: str) -> ad.AnnData:
         Concatenated AnnData across all samples, with obs['gsm_id'] set.
     """
     print(f"Loading TAR of TXT DGE matrices: {tar_path}")
+    # Extract next to the TAR file (only once — skip if already done)
     extract_dir = tar_path.replace(".tar", "_extracted")
 
     if not os.path.isdir(extract_dir):
         print(f"  Extracting to {extract_dir}...")
         os.makedirs(extract_dir, exist_ok=True)
         with tarfile.open(tar_path, "r") as tar:
-            tar.extractall(path=extract_dir, filter="data")
+            tar.extractall(path=extract_dir, filter="data")  # filter="data" is a security setting
 
+    # Find all .txt or .txt.gz files inside the extracted folder
     txt_files = sorted(
         glob.glob(os.path.join(extract_dir, "**", "*.txt*"), recursive=True)
     )
-    if not txt_files:
+    if not txt_files:  # fall back to .tsv extension
         txt_files = sorted(
             glob.glob(os.path.join(extract_dir, "**", "*.tsv*"), recursive=True)
         )
@@ -126,34 +148,39 @@ def load_tar_txt_dge(tar_path: str) -> ad.AnnData:
     adatas = []
     for fpath in txt_files:
         fname = os.path.basename(fpath)
+        # Extract the GSM accession from the filename (e.g. "GSM5032701_DGE.txt.gz" → "GSM5032701")
         gsm_id = fname.split("_")[0] if fname.startswith("GSM") else fname.split(".")[0]
         print(f"  Loading {fname} (GSM: {gsm_id})...")
 
         try:
-            df = pd.read_csv(fpath, sep="\t", index_col=0)
+            df = pd.read_csv(fpath, sep="\t", index_col=0)  # try tab-separated first
         except Exception:
-            df = pd.read_csv(fpath, sep=",", index_col=0)
+            df = pd.read_csv(fpath, sep=",", index_col=0)   # fall back to comma-separated
 
-        # Determine orientation: if first row name looks like a barcode, already cells × genes
+        # Figure out if the file is genes×cells or cells×genes by checking the row names.
+        # Cell barcodes are DNA sequences (only A, C, G, T, N), so we use that as a clue.
         first_name = str(df.index[0])
         is_barcode = all(c in "ACGTN-0123456789" for c in first_name.replace("_", ""))
         if is_barcode:
+            # Rows are already cells — no transpose needed
             adata_s = ad.AnnData(
                 X=sp.csr_matrix(df.values),
                 obs=pd.DataFrame(index=df.index),
                 var=pd.DataFrame(index=df.columns),
             )
         else:
+            # Rows are genes — transpose so cells become rows
             adata_s = ad.AnnData(
                 X=sp.csr_matrix(df.values.T),
                 obs=pd.DataFrame(index=df.columns),
                 var=pd.DataFrame(index=df.index),
             )
 
-        adata_s.obs["gsm_id"] = gsm_id
+        adata_s.obs["gsm_id"] = gsm_id  # tag every cell with its sample accession
         adatas.append(adata_s)
         print(f"    {adata_s.n_obs} cells × {adata_s.n_vars} genes")
 
+    # Stack all samples into one AnnData; label="gsm_key" adds a column recording the source
     adata = ad.concat(adatas, label="gsm_key", keys=[a.obs["gsm_id"].iloc[0] for a in adatas])
     print(f"  Concatenated: {adata.n_obs} cells × {adata.n_vars} genes")
     return adata
@@ -162,8 +189,8 @@ def load_tar_txt_dge(tar_path: str) -> ad.AnnData:
 def load_tar_10x(tar_path: str) -> ad.AnnData:
     """Extract a TAR of per-sample 10x directories and concatenate into AnnData.
 
-    Each sub-directory inside the TAR that contains a matrix.mtx or matrix.mtx.gz
-    is treated as one sample. obs['sample'] is set to the directory name.
+    Some GEO deposits package each sample's 10x files in its own sub-folder
+    inside a TAR archive. We extract them all and load each folder separately.
 
     Args:
         tar_path: Path to the .tar file containing per-sample 10x directories.
@@ -180,7 +207,7 @@ def load_tar_10x(tar_path: str) -> ad.AnnData:
         with tarfile.open(tar_path, "r") as tar:
             tar.extractall(path=extract_dir, filter="data")
 
-    # Find all sub-directories that contain a matrix file
+    # Walk the extracted folder tree; any folder containing matrix.mtx is a 10x sample
     sample_dirs = []
     for root, _, files in os.walk(extract_dir):
         if any(f.endswith(("matrix.mtx", "matrix.mtx.gz")) for f in files):
@@ -196,7 +223,7 @@ def load_tar_10x(tar_path: str) -> ad.AnnData:
         print(f"  Loading {sample_name}...")
         try:
             a = sc.read_10x_mtx(sd, var_names="gene_symbols", make_unique=True)
-            a.obs["sample"] = sample_name
+            a.obs["sample"] = sample_name  # tag every cell with its sample folder name
             adatas.append(a)
             print(f"    {a.n_obs} cells × {a.n_vars} genes")
         except Exception as exc:
@@ -221,18 +248,17 @@ def assign_sample_metadata(
 ) -> ad.AnnData:
     """Map per-sample metadata onto obs columns.
 
-    Supports two demultiplexing strategies driven by SampleConfig:
-      - barcode_suffix: cells whose barcode ends with "-<suffix>" belong to that sample
-      - gsm_id: cells whose obs['gsm_id'] matches belong to that sample
-
-    Sets obs columns: sample, condition, tissue_ontology_term_id,
-    disease_ontology_term_id, donor_id.
+    After loading, cells don't know which patient or condition they came from.
+    This function tags each cell with its sample ID, condition (e.g. "tumor"),
+    tissue, and disease using one of two strategies:
+      - barcode_suffix: the number at the end of a 10x barcode (e.g. "-1") identifies the sample
+      - gsm_id: the GSM accession already stored in obs['gsm_id'] identifies the sample
 
     Args:
-        adata: AnnData to annotate (modified in place).
+        adata: AnnData to annotate.
         samples: List of SampleConfig entries from the dataset YAML.
-        dataset_tissue: Fallback tissue ontology term from CellxGeneConfig.
-        dataset_disease: Fallback disease ontology term from CellxGeneConfig.
+        dataset_tissue: Default tissue ontology term (used if no per-sample override).
+        dataset_disease: Default disease ontology term (used if no per-sample override).
 
     Returns:
         The annotated AnnData.
@@ -243,36 +269,40 @@ def assign_sample_metadata(
 
     n = adata.n_obs
 
-    # Use positional numpy arrays to avoid label-indexing issues when obs
-    # names are non-unique (common after ad.concat across samples).
+    # Build plain numpy arrays for each annotation column.
+    # We use positional arrays (indexed by position, not by barcode name) to
+    # avoid problems when multiple cells share the same barcode after concatenation.
     sample_arr    = np.full(n, "unknown",       dtype=object)
     condition_arr = np.full(n, "unknown",       dtype=object)
-    tissue_arr    = np.full(n, dataset_tissue,  dtype=object)
-    disease_arr   = np.full(n, dataset_disease, dtype=object)
+    tissue_arr    = np.full(n, dataset_tissue,  dtype=object)  # start with dataset default
+    disease_arr   = np.full(n, dataset_disease, dtype=object)  # start with dataset default
 
-    # Determine strategy from which field is populated in SampleConfig
+    # Check which demultiplexing strategy the YAML config uses
     use_suffix = any(s.barcode_suffix is not None for s in samples)
     use_gsm    = any(s.gsm_id is not None for s in samples)
 
     if use_suffix:
+        # Build a lookup: suffix string → SampleConfig
         suffix_map = {s.barcode_suffix: s for s in samples if s.barcode_suffix is not None}
+        # Extract the part after the last "-" in each barcode (e.g. "ACGT001-1" → "1")
         obs_suffixes = np.array([
             bc.split("-")[-1] if "-" in bc else "" for bc in adata.obs_names
         ])
         for suffix, s in suffix_map.items():
-            mask = obs_suffixes == suffix
+            mask = obs_suffixes == suffix  # True for every cell that belongs to this sample
             sample_arr[mask]    = s.id
             condition_arr[mask] = s.condition
             if s.tissue_ontology_term_id:
-                tissue_arr[mask]  = s.tissue_ontology_term_id
+                tissue_arr[mask]  = s.tissue_ontology_term_id   # per-sample tissue override
             if s.disease_ontology_term_id:
-                disease_arr[mask] = s.disease_ontology_term_id
+                disease_arr[mask] = s.disease_ontology_term_id  # per-sample disease override
 
     elif use_gsm and "gsm_id" in adata.obs.columns:
+        # Build a lookup: GSM accession string → SampleConfig
         gsm_map = {s.gsm_id: s for s in samples if s.gsm_id is not None}
-        obs_gsm = adata.obs["gsm_id"].to_numpy(dtype=str)
+        obs_gsm = adata.obs["gsm_id"].to_numpy(dtype=str)  # array of GSM IDs, one per cell
         for gsm_id_val, s in gsm_map.items():
-            mask = obs_gsm == gsm_id_val
+            mask = obs_gsm == gsm_id_val  # True for every cell from this GSM sample
             sample_arr[mask]    = s.id
             condition_arr[mask] = s.condition
             if s.tissue_ontology_term_id:
@@ -280,11 +310,12 @@ def assign_sample_metadata(
             if s.disease_ontology_term_id:
                 disease_arr[mask] = s.disease_ontology_term_id
 
+    # Write the arrays back into the AnnData observation table
     adata.obs["sample"]                   = sample_arr
     adata.obs["condition"]                = condition_arr
     adata.obs["tissue_ontology_term_id"]  = tissue_arr
     adata.obs["disease_ontology_term_id"] = disease_arr
-    adata.obs["donor_id"]                 = sample_arr
+    adata.obs["donor_id"]                 = sample_arr  # donor = sample for single-patient studies
 
     print("  Sample assignment summary:")
     for val, count in adata.obs["sample"].value_counts().items():
@@ -298,14 +329,15 @@ def assign_sample_metadata(
 def preprocess_adata(adata: ad.AnnData, config: PreprocessingConfig) -> ad.AnnData:
     """Run standard scanpy QC and preprocessing pipeline.
 
-    Steps:
-      1. Make names unique
-      2. Filter cells/genes by minimum counts
-      3. Mitochondrial QC and filtering
-      4. Normalize total counts and log1p transform
-      5. Store raw (for downstream DE)
-      6. Highly variable gene selection
-      7. Scale → PCA → neighbors → UMAP → Leiden clustering
+    Raw scRNA-seq counts need several cleaning and transformation steps before
+    they can be used for machine learning or visualisation:
+      1. Remove low-quality cells and rarely-detected genes
+      2. Filter out dying cells (high mitochondrial gene expression)
+      3. Normalise so all cells are comparable regardless of sequencing depth
+      4. Log-transform to compress the dynamic range
+      5. Select only the most informative genes (highly variable genes)
+      6. Reduce dimensions with PCA, then build a UMAP for visualisation
+      7. Cluster cells with the Leiden algorithm
 
     Args:
         adata: Input AnnData (cells × genes, raw counts).
@@ -316,13 +348,18 @@ def preprocess_adata(adata: ad.AnnData, config: PreprocessingConfig) -> ad.AnnDa
     """
     print(f"Preprocessing: {adata.n_obs} cells × {adata.n_vars} genes")
 
+    # Step 1 — make sure every cell and gene has a unique name
     adata.var_names_make_unique()
     adata.obs_names_make_unique()
 
-    sc.pp.filter_cells(adata, min_genes=config.min_genes)
-    sc.pp.filter_genes(adata, min_cells=config.min_cells)
+    # Step 2 — remove very sparse cells and genes (likely low-quality or noise)
+    sc.pp.filter_cells(adata, min_genes=config.min_genes)  # drop cells with too few genes detected
+    sc.pp.filter_genes(adata, min_cells=config.min_cells)  # drop genes seen in very few cells
     print(f"  After basic filtering: {adata.n_obs} cells × {adata.n_vars} genes")
 
+    # Step 3 — calculate what percentage of each cell's counts are mitochondrial.
+    # Dying or damaged cells leak cytoplasmic RNA, leaving only mitochondrial RNA behind.
+    # Human mitochondrial genes are named "MT-..." so we flag them here.
     adata.var["mt"] = adata.var_names.str.startswith("MT-")
     sc.pp.calculate_qc_metrics(
         adata, qc_vars=["mt"], percent_top=None, log1p=False, inplace=True
@@ -332,6 +369,7 @@ def preprocess_adata(adata: ad.AnnData, config: PreprocessingConfig) -> ad.AnnDa
         f"max={adata.obs['pct_counts_mt'].max():.1f}"
     )
 
+    # Remove cells with too high MT% — they are likely dying
     n_before = adata.n_obs
     adata = adata[adata.obs["pct_counts_mt"] < config.mt_pct_threshold, :].copy()
     print(
@@ -339,18 +377,41 @@ def preprocess_adata(adata: ad.AnnData, config: PreprocessingConfig) -> ad.AnnDa
         f"removed {n_before - adata.n_obs} cells, {adata.n_obs} remaining"
     )
 
+    # Step 4 — normalise: scale every cell so its total counts sum to 10,000.
+    # This removes the effect of sequencing depth (some cells were just sequenced more).
     sc.pp.normalize_total(adata, target_sum=1e4)
+    # Log-transform: log(x+1) compresses the large range of counts (0 to thousands)
+    # so that highly-expressed genes don't dominate the analysis.
     sc.pp.log1p(adata)
+
+    # Step 5 — save the normalised counts before further transformation.
+    # This "raw" slot is used later for differential expression analysis.
     adata.raw = adata
 
+    # Step 6 — select the most variable genes (those that differ most across cells).
+    # These carry the most biological information for distinguishing cell types.
     sc.pp.highly_variable_genes(adata, n_top_genes=config.n_top_genes)
     print(f"  Highly variable genes: {adata.var['highly_variable'].sum()}")
-    adata = adata[:, adata.var.highly_variable].copy()
+    adata = adata[:, adata.var.highly_variable].copy()  # keep only HVGs
 
+    # Step 7 — scale genes so they all have mean 0 and similar variance.
+    # max_value=10 clips extreme outliers.
     sc.pp.scale(adata, max_value=10)
+
+    # PCA (Principal Component Analysis): compress thousands of gene dimensions
+    # into 30 principal components that capture most of the variation.
     sc.tl.pca(adata)
+
+    # Build a "neighborhood graph": connect each cell to its most similar neighbours
+    # in PCA space. Downstream clustering and UMAP use this graph.
     sc.pp.neighbors(adata, n_pcs=config.n_pcs)
+
+    # UMAP: project the high-dimensional data into 2D for visualisation.
+    # Cells that are similar biologically end up close together on the plot.
     sc.tl.umap(adata)
+
+    # Leiden clustering: group cells into clusters based on the neighborhood graph.
+    # Higher resolution = more, smaller clusters.
     sc.tl.leiden(adata, resolution=config.leiden_resolution)
 
     print(
@@ -367,18 +428,19 @@ def annotate_cellxgene_metadata(
 ) -> ad.AnnData:
     """Add required cellxGene schema 5.0.0 fields to obs, var, and uns.
 
-    Per-cell tissue/disease overrides assigned by assign_sample_metadata()
-    take precedence over the dataset-level defaults in config.
+    cellxGene is the Chan Zuckerberg Initiative's single-cell browser. To upload
+    a dataset it must have specific metadata columns with standardised ontology
+    IDs. Per-cell overrides from assign_sample_metadata() take precedence.
 
     Args:
-        adata: AnnData to annotate (modified in place).
+        adata: AnnData to annotate.
         config: CellxGeneConfig with ontology term IDs.
         title: Dataset title stored in uns['title'].
 
     Returns:
         The annotated AnnData.
     """
-    # obs fields — only set if not already present (per-sample overrides win)
+    # Only set obs fields if they weren't already set per-cell by assign_sample_metadata
     if "organism_ontology_term_id" not in adata.obs.columns:
         adata.obs["organism_ontology_term_id"] = config.organism_ontology_term_id
     if "assay_ontology_term_id" not in adata.obs.columns:
@@ -388,10 +450,11 @@ def annotate_cellxgene_metadata(
     if "disease_ontology_term_id" not in adata.obs.columns:
         adata.obs["disease_ontology_term_id"] = config.disease_ontology_term_id
 
+    # Fill in remaining required fields with "unknown" if not already present
     for col, default in [
-        ("cell_type_ontology_term_id", "unknown"),
+        ("cell_type_ontology_term_id", "unknown"),  # we haven't done cell-type annotation yet
         ("donor_id", "unknown"),
-        ("suspension_type", "cell"),
+        ("suspension_type", "cell"),                # "cell" means single-cell (not nucleus)
         ("sex_ontology_term_id", "unknown"),
         ("development_stage_ontology_term_id", "unknown"),
         ("self_reported_ethnicity_ontology_term_id", "unknown"),
@@ -400,21 +463,21 @@ def annotate_cellxgene_metadata(
             adata.obs[col] = default
 
     if "is_primary_data" not in adata.obs.columns:
-        adata.obs["is_primary_data"] = True
+        adata.obs["is_primary_data"] = True  # this is original data, not a reanalysis
 
-    # var fields
+    # var fields describe each gene (feature)
     if "feature_is_filtered" not in adata.var.columns:
-        adata.var["feature_is_filtered"] = False
+        adata.var["feature_is_filtered"] = False   # none of our HVGs were manually filtered
     if "feature_name" not in adata.var.columns:
-        adata.var["feature_name"] = adata.var_names
+        adata.var["feature_name"] = adata.var_names  # gene symbol, e.g. "TP53"
     if "feature_biotype" not in adata.var.columns:
         adata.var["feature_biotype"] = "gene"
 
-    # uns fields
+    # uns (unstructured metadata) holds dataset-level information
     adata.uns["schema_version"] = "5.0.0"
     adata.uns["title"] = title
     if "X_umap" in adata.obsm:
-        adata.uns["default_embedding"] = "X_umap"
+        adata.uns["default_embedding"] = "X_umap"  # tell cellxGene which plot to show by default
 
     return adata
 
@@ -429,8 +492,9 @@ def validate_cellxgene(adata: ad.AnnData, name: str = "dataset") -> bool:
     Returns:
         True if all required fields are present, False otherwise.
     """
-    issues = []
+    issues = []  # collect all problems before reporting them
 
+    # Every cell (obs row) must have these columns
     required_obs = [
         "organism_ontology_term_id",
         "tissue_ontology_term_id",
@@ -448,14 +512,17 @@ def validate_cellxgene(adata: ad.AnnData, name: str = "dataset") -> bool:
         if col not in adata.obs.columns:
             issues.append(f"Missing obs column: {col}")
 
+    # Every gene (var row) must have these columns
     for col in ["feature_is_filtered", "feature_name", "feature_biotype"]:
         if col not in adata.var.columns:
             issues.append(f"Missing var column: {col}")
 
+    # Dataset-level metadata must be present
     for key in ["schema_version", "title"]:
         if key not in adata.uns:
             issues.append(f"Missing uns key: {key}")
 
+    # cellxGene needs a UMAP embedding to display cells as a scatter plot
     if "X_umap" not in adata.obsm:
         issues.append("Missing obsm embedding: X_umap")
 
@@ -474,6 +541,10 @@ def validate_cellxgene(adata: ad.AnnData, name: str = "dataset") -> bool:
 def convert_dataset(config: DatasetConfig, output_dir: str) -> str:
     """Load, preprocess, annotate, validate, and save a GEO dataset as .h5ad.
 
+    This is the main function called by `python run.py convert`. It runs all
+    the steps in order and saves the result as an HDF5-backed AnnData file
+    (.h5ad) that can be uploaded to cellxGene or used for ML training.
+
     Args:
         config: Populated DatasetConfig from a dataset YAML file.
         output_dir: Directory to write the processed .h5ad file.
@@ -485,15 +556,15 @@ def convert_dataset(config: DatasetConfig, output_dir: str) -> str:
         ValueError: If the file format is unrecognised or validation fails.
     """
     os.makedirs(output_dir, exist_ok=True)
-    base = config.source.base_path
+    base = config.source.base_path  # root directory where raw files live
 
     print(f"\n{'='*60}")
     print(f"Converting {config.id}: {config.title}")
     print(f"{'='*60}")
 
-    # Load raw data
+    # Step 1 — load raw data using the correct loader for this file format
     file_cfg: FileConfig = config.files[0]
-    abs_path = os.path.join(base, file_cfg.relative_path)
+    abs_path = os.path.join(base, file_cfg.relative_path)  # full path to the data file
 
     if file_cfg.format == "csv_dge":
         adata = load_csv_dge(abs_path)
@@ -506,7 +577,7 @@ def convert_dataset(config: DatasetConfig, output_dir: str) -> str:
     else:
         raise ValueError(f"Unknown file format: {file_cfg.format!r}")
 
-    # Assign per-sample metadata
+    # Step 2 — label each cell with its sample, condition, tissue, and disease
     adata = assign_sample_metadata(
         adata,
         config.samples,
@@ -514,18 +585,18 @@ def convert_dataset(config: DatasetConfig, output_dir: str) -> str:
         dataset_disease=config.cellxgene.disease_ontology_term_id,
     )
 
-    # Preprocess
+    # Step 3 — run QC, normalisation, HVG selection, PCA, UMAP, and clustering
     adata = preprocess_adata(adata, config.preprocessing)
 
-    # Annotate cellxGene fields
+    # Step 4 — add the metadata columns required by the cellxGene schema
     adata = annotate_cellxgene_metadata(adata, config.cellxgene, title=config.title)
 
-    # Validate
+    # Step 5 — confirm all required fields are present before saving
     ok = validate_cellxgene(adata, name=config.id)
     if not ok:
         raise ValueError(f"cellxGene validation failed for {config.id}")
 
-    # Write
+    # Step 6 — write the processed AnnData to disk as an .h5ad file
     out_path = os.path.join(output_dir, f"{config.id}_processed.h5ad")
     adata.write_h5ad(out_path)
     size_mb = os.path.getsize(out_path) / 1e6
