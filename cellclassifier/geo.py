@@ -10,6 +10,7 @@ import tempfile
 import warnings
 
 import anndata as ad
+import numpy as np
 import pandas as pd
 import scanpy as sc
 import scipy.sparse as sp
@@ -111,7 +112,7 @@ def load_tar_txt_dge(tar_path: str) -> ad.AnnData:
         print(f"  Extracting to {extract_dir}...")
         os.makedirs(extract_dir, exist_ok=True)
         with tarfile.open(tar_path, "r") as tar:
-            tar.extractall(path=extract_dir)
+            tar.extractall(path=extract_dir, filter="data")
 
     txt_files = sorted(
         glob.glob(os.path.join(extract_dir, "**", "*.txt*"), recursive=True)
@@ -177,7 +178,7 @@ def load_tar_10x(tar_path: str) -> ad.AnnData:
         print(f"  Extracting to {extract_dir}...")
         os.makedirs(extract_dir, exist_ok=True)
         with tarfile.open(tar_path, "r") as tar:
-            tar.extractall(path=extract_dir)
+            tar.extractall(path=extract_dir, filter="data")
 
     # Find all sub-directories that contain a matrix file
     sample_dirs = []
@@ -240,48 +241,50 @@ def assign_sample_metadata(
         print("  No sample configs provided — skipping sample metadata assignment.")
         return adata
 
-    barcodes = adata.obs_names.tolist()
+    n = adata.n_obs
 
-    # Determine strategy from first sample that has a value set
+    # Use positional numpy arrays to avoid label-indexing issues when obs
+    # names are non-unique (common after ad.concat across samples).
+    sample_arr    = np.full(n, "unknown",       dtype=object)
+    condition_arr = np.full(n, "unknown",       dtype=object)
+    tissue_arr    = np.full(n, dataset_tissue,  dtype=object)
+    disease_arr   = np.full(n, dataset_disease, dtype=object)
+
+    # Determine strategy from which field is populated in SampleConfig
     use_suffix = any(s.barcode_suffix is not None for s in samples)
-    use_gsm = any(s.gsm_id is not None for s in samples)
-
-    sample_col = pd.Series("unknown", index=adata.obs_names)
-    condition_col = pd.Series("unknown", index=adata.obs_names)
-    tissue_col = pd.Series(dataset_tissue, index=adata.obs_names)
-    disease_col = pd.Series(dataset_disease, index=adata.obs_names)
+    use_gsm    = any(s.gsm_id is not None for s in samples)
 
     if use_suffix:
         suffix_map = {s.barcode_suffix: s for s in samples if s.barcode_suffix is not None}
-        for bc in barcodes:
-            suffix = bc.split("-")[-1] if "-" in bc else None
-            if suffix and suffix in suffix_map:
-                s = suffix_map[suffix]
-                sample_col[bc] = s.id
-                condition_col[bc] = s.condition
-                if s.tissue_ontology_term_id:
-                    tissue_col[bc] = s.tissue_ontology_term_id
-                if s.disease_ontology_term_id:
-                    disease_col[bc] = s.disease_ontology_term_id
+        obs_suffixes = np.array([
+            bc.split("-")[-1] if "-" in bc else "" for bc in adata.obs_names
+        ])
+        for suffix, s in suffix_map.items():
+            mask = obs_suffixes == suffix
+            sample_arr[mask]    = s.id
+            condition_arr[mask] = s.condition
+            if s.tissue_ontology_term_id:
+                tissue_arr[mask]  = s.tissue_ontology_term_id
+            if s.disease_ontology_term_id:
+                disease_arr[mask] = s.disease_ontology_term_id
 
     elif use_gsm and "gsm_id" in adata.obs.columns:
         gsm_map = {s.gsm_id: s for s in samples if s.gsm_id is not None}
-        for bc in barcodes:
-            gsm = adata.obs.at[bc, "gsm_id"]
-            if gsm in gsm_map:
-                s = gsm_map[gsm]
-                sample_col[bc] = s.id
-                condition_col[bc] = s.condition
-                if s.tissue_ontology_term_id:
-                    tissue_col[bc] = s.tissue_ontology_term_id
-                if s.disease_ontology_term_id:
-                    disease_col[bc] = s.disease_ontology_term_id
+        obs_gsm = adata.obs["gsm_id"].to_numpy(dtype=str)
+        for gsm_id_val, s in gsm_map.items():
+            mask = obs_gsm == gsm_id_val
+            sample_arr[mask]    = s.id
+            condition_arr[mask] = s.condition
+            if s.tissue_ontology_term_id:
+                tissue_arr[mask]  = s.tissue_ontology_term_id
+            if s.disease_ontology_term_id:
+                disease_arr[mask] = s.disease_ontology_term_id
 
-    adata.obs["sample"] = sample_col.values
-    adata.obs["condition"] = condition_col.values
-    adata.obs["tissue_ontology_term_id"] = tissue_col.values
-    adata.obs["disease_ontology_term_id"] = disease_col.values
-    adata.obs["donor_id"] = sample_col.values
+    adata.obs["sample"]                   = sample_arr
+    adata.obs["condition"]                = condition_arr
+    adata.obs["tissue_ontology_term_id"]  = tissue_arr
+    adata.obs["disease_ontology_term_id"] = disease_arr
+    adata.obs["donor_id"]                 = sample_arr
 
     print("  Sample assignment summary:")
     for val, count in adata.obs["sample"].value_counts().items():
