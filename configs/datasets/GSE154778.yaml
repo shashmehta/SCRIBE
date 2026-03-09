@@ -32,56 +32,55 @@ cellxgene:
   tissue_ontology_term_id: "UBERON:0001264"  # pancreas
   organism_ontology_term_id: "NCBITaxon:9606"
 
-# Sample metadata: barcode prefixes must be confirmed by inspecting the loaded
-# data (run convert with no samples list first, print barcode patterns, then
-# fill in the id/condition/barcode_suffix values below).
-# TODO: replace placeholder IDs with actual sample identifiers from GEO.
+# Sample metadata: barcode prefixes confirmed by running:
+#   python run.py inspect --config configs/datasets/GSE154778.yaml
+# Barcodes use "PREFIX:INDEX" format (e.g. "P03:1"). The prefix identifies the sample.
 samples:
   - id: "Primary_T1"
     condition: "primary"
-    barcode_suffix: null   # set once barcode pattern is known
+    barcode_prefix: "P01"
   - id: "Primary_T2"
     condition: "primary"
-    barcode_suffix: null
+    barcode_prefix: "P02"
   - id: "Primary_T3"
     condition: "primary"
-    barcode_suffix: null
+    barcode_prefix: "P03"
   - id: "Primary_T4"
     condition: "primary"
-    barcode_suffix: null
+    barcode_prefix: "P04"
   - id: "Primary_T5"
     condition: "primary"
-    barcode_suffix: null
+    barcode_prefix: "P05"
   - id: "Primary_T6"
     condition: "primary"
-    barcode_suffix: null
+    barcode_prefix: "P06"
   - id: "Primary_T7"
     condition: "primary"
-    barcode_suffix: null
+    barcode_prefix: "P07"
   - id: "Primary_T8"
     condition: "primary"
-    barcode_suffix: null
+    barcode_prefix: "P08"
   - id: "Primary_T9"
     condition: "primary"
-    barcode_suffix: null
+    barcode_prefix: "P09"
   - id: "Primary_T10"
     condition: "primary"
-    barcode_suffix: null
+    barcode_prefix: "P10"
   - id: "Metastatic_T1"
     condition: "metastatic"
-    barcode_suffix: null
+    barcode_prefix: "MET01"
   - id: "Metastatic_T2"
     condition: "metastatic"
-    barcode_suffix: null
+    barcode_prefix: "MET02"
   - id: "Metastatic_T3"
     condition: "metastatic"
-    barcode_suffix: null
+    barcode_prefix: "MET03"
   - id: "Metastatic_T4"
     condition: "metastatic"
-    barcode_suffix: null
+    barcode_prefix: "MET04"
   - id: "Metastatic_T5"
     condition: "metastatic"
-    barcode_suffix: null
+    barcode_prefix: "MET05"
   - id: "Metastatic_T6"
     condition: "metastatic"
-    barcode_suffix: null
+    barcode_prefix: "MET06"

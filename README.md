@@ -1,25 +1,31 @@
-# CellClassifier
+# PASCAL
+### Pancreatic Annotation and Single-Cell Analysis
 
-A Python machine learning pipeline for classifying pancreatic cell types using single-cell RNA sequencing (scRNA-seq) data. This tool helps distinguish normal vs tumor cells in Pancreatic Ductal Adenocarcinoma (PDAC) and identifies key biomarkers for potential therapeutic targets.
+A Python machine learning pipeline for classifying pancreatic cell types using single-cell RNA sequencing (scRNA-seq) data. PASCAL loads raw data from public databases, cleans it, trains a Random Forest classifier to distinguish **normal**, **precancerous**, and **malignant** pancreatic cells, and identifies the top genes driving each classification.
 
 ## Overview
 
-CellClassifier uses Random Forest classification on gene expression data to:
-- **Classify** normal vs malignant pancreatic cells
+PASCAL uses Random Forest classification on gene expression data to:
+- **Convert** raw GEO datasets into a standard format
+- **Classify** pancreatic cells into 3 classes: normal, precancerous, and malignant
 - **Identify** top discriminating genes through feature importance analysis
 - **Analyze** differential gene expression between conditions
 - **Visualize** results with UMAP plots and feature importance charts
+- **Combine** multiple datasets for a unified cross-study model
 
 The pipeline is designed for researchers working with single-cell RNA-seq data in `.h5ad` (AnnData) format.
 
-## Features
+## Datasets
 
-- 🧬 **Random Forest Classification** - Robust cell type classification
-- 📊 **Differential Expression Analysis** - Identify genes enriched in tumor vs normal cells
-- 🎯 **Feature Importance Ranking** - Discover top discriminating genes
-- 📈 **UMAP Visualization** - Generate publication-ready plots
-- 💾 **Model Persistence** - Save and reload trained models
-- ☁️ **Google Drive Integration** - Download datasets directly from shared links
+PASCAL is built on three published pancreatic scRNA-seq studies from GEO:
+
+| Dataset | Description | Conditions |
+|---------|-------------|------------|
+| GSE154778 | Primary vs metastatic PDAC (10+6 samples) | primary, metastatic |
+| GSE162708 | Pancreatic neuroendocrine tumor (24,544 cells) | primary_tumor, metastasis, normal |
+| GSE165399 | Normal pancreas, IPMN, adenosquamous carcinoma | normal, IPMN, PASC |
+
+These are unified into a 3-class scheme: **normal / precancerous / malignant**.
 
 ## Installation
 
@@ -32,14 +38,14 @@ The pipeline is designed for researchers working with single-cell RNA-seq data i
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/CellClassifier.git
-   cd CellClassifier
+   git clone https://github.com/yourusername/PASCAL.git
+   cd PASCAL
    ```
 
 2. **Create and activate conda environment:**
    ```bash
-   conda create -n cellclassifier python=3.12
-   conda activate cellclassifier
+   conda create -n pascal python=3.12
+   conda activate pascal
    ```
 
 3. **Install dependencies:**
@@ -49,88 +55,122 @@ The pipeline is designed for researchers working with single-cell RNA-seq data i
 
 ## Usage
 
-### Quick Start
+PASCAL is run through `run.py` using sub-commands (similar to how `git commit` and `git push` are sub-commands of `git`).
 
-**Option 1: Download data from Google Drive**
-```bash
-python run.py --gdrive-id YOUR_GOOGLE_DRIVE_FILE_ID --output ./output
-```
+### Step 1 — Inspect raw data (optional but recommended)
 
-**Option 2: Use local H5AD file**
-```bash
-python run.py --data ./data/pdac.h5ad --output ./output
-```
-
-### Command Line Options
+Before converting a dataset, you can inspect its barcode structure to confirm sample demultiplexing will work:
 
 ```bash
-python run.py [OPTIONS]
+python run.py inspect --config configs/datasets/GSE154778.yaml
 ```
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--data PATH` | Path to local H5AD file | None |
-| `--gdrive-id ID` | Google Drive file ID to download | None |
-| `--output DIR` | Output directory for results | `./output` |
-| `--model PATH` | Load existing model (skip training) | None |
-| `--retrain` | Force retrain even if model exists | False |
+This prints the barcode suffix distribution so you can fill in the `barcode_suffix` values in the YAML.
 
-### Getting Your Google Drive File ID
+### Step 2 — Convert GEO datasets to `.h5ad`
 
-If you have data stored on Google Drive, you'll need to extract the file ID from the sharing link.
-
-**Step 1: Share your file**
-1. Right-click your `.h5ad` file in Google Drive
-2. Click "Share" → "Get link"
-3. Set access to **"Anyone with the link"** and **"Viewer"**
-4. Copy the link
-
-**Step 2: Extract the file ID**
-
-Your Google Drive link will look like one of these formats:
-
-```
-https://drive.google.com/file/d/1abc123XYZ456def789/view?usp=sharing
-                              ↑─────────────────↑
-                                 This is your FILE ID
-```
-
-Or:
-```
-https://drive.google.com/open?id=1abc123XYZ456def789
-                                 ↑─────────────────↑
-                                    FILE ID
-```
-
-**Example:**
-- Link: `https://drive.google.com/file/d/1abc123XYZ456def789/view?usp=sharing`
-- File ID: `1abc123XYZ456def789`
-- Command: `python run.py --gdrive-id 1abc123XYZ456def789 --output ./output`
-
-> **⚠️ Important:** The file must be shared with "Anyone with the link can view" permissions for the download to work.
-
-### Examples
-
-**First run with Google Drive data:**
 ```bash
-python run.py --gdrive-id 1abc123xyz --output ./output
+python run.py convert --config configs/datasets/GSE154778.yaml --output ./output
+python run.py convert --config configs/datasets/GSE162708.yaml --output ./output
+python run.py convert --config configs/datasets/GSE165399.yaml --output ./output
 ```
-This will:
-- Download the dataset from Google Drive
-- Train a new Random Forest model
-- Generate evaluation metrics
-- Create UMAP and feature importance plots
-- Save model artifact for reuse
 
-**Reuse trained model:**
+Each produces a processed `.h5ad` file with UMAP embeddings and cellxGene-compliant metadata.
+
+### Step 3 — Run per-dataset analysis (optional)
+
+Train and evaluate a classifier on each dataset individually:
+
 ```bash
-python run.py --data ./output/data/pdac_data.h5ad --model ./output/model_artifact.joblib
+python run.py run --config configs/pipeline.yaml \
+    --data ./output/GSE154778_processed.h5ad \
+    --output ./output/GSE154778
 ```
-This will load the existing model and skip training.
 
-**Retrain on new data:**
+### Step 4 — Merge datasets for combined training
+
 ```bash
-python run.py --data ./new_data/pdac_updated.h5ad --retrain --output ./output_v2
+python run.py merge \
+    --data ./output/GSE154778_processed.h5ad \
+    --data ./output/GSE162708_processed.h5ad \
+    --data ./output/GSE165399_processed.h5ad \
+    --condition-map configs/condition_map.yaml \
+    --output ./output/combined
+```
+
+This remaps all condition labels to the unified 3-class scheme and produces `combined_processed.h5ad`.
+
+### Step 5 — Train 3-class combined model
+
+```bash
+python run.py run --config configs/pipeline.yaml \
+    --data ./output/combined/combined_processed.h5ad \
+    --output ./output/combined
+```
+
+Produces a model that classifies cells as **normal**, **precancerous**, or **malignant** across all three datasets.
+
+### Other commands
+
+```bash
+# Evaluate a saved model on new data
+python run.py evaluate --config configs/pipeline.yaml \
+    --model ./output/model_artifact.joblib \
+    --data ./output/new_data.h5ad
+
+# Generate plots from a saved model
+python run.py plot --config configs/pipeline.yaml \
+    --model ./output/model_artifact.joblib \
+    --output ./output
+
+# Force retrain even if a model already exists
+python run.py run --config configs/pipeline.yaml --retrain
+```
+
+## Output Structure
+
+```
+output/
+├── GSE154778_processed.h5ad      # Per-dataset converted file
+├── GSE162708_processed.h5ad
+├── GSE165399_processed.h5ad
+├── combined/
+│   ├── combined_processed.h5ad   # Merged 3-dataset file
+│   ├── model_artifact.joblib     # Trained 3-class RF model
+│   └── plots/
+│       ├── umap_condition.png    # UMAP colored by condition
+│       ├── umap_dataset.png      # UMAP colored by dataset source
+│       └── feature_importances.png
+└── GSE154778/                    # Per-dataset analysis output
+    ├── model_artifact.joblib
+    └── plots/
+```
+
+## Project Structure
+
+```
+PASCAL/
+├── cellclassifier/           # Main Python package
+│   ├── __init__.py
+│   ├── cli.py               # CLI sub-commands (convert, inspect, merge, run, ...)
+│   ├── config.py            # YAML config loading into dataclasses
+│   ├── data.py              # Data loading, merging, and ML feature extraction
+│   ├── geo.py               # GEO raw data loading and preprocessing
+│   ├── model.py             # RF training, evaluation, and artifact save/load
+│   ├── analysis.py          # Differential expression analysis
+│   └── plotting.py          # UMAP and feature importance plots
+├── configs/
+│   ├── pipeline.yaml        # ML pipeline settings (RF hyperparameters, etc.)
+│   ├── condition_map.yaml   # Maps per-dataset conditions to normal/precancerous/malignant
+│   └── datasets/
+│       ├── GSE154778.yaml
+│       ├── GSE162708.yaml
+│       └── GSE165399.yaml
+├── tests/                   # Test suite (50 tests)
+├── run.py                   # Entry point
+├── requirements.txt
+└── docs/
+    └── CODEBASE_GUIDE.md    # Detailed technical guide
 ```
 
 ## How It Works
@@ -138,158 +178,70 @@ python run.py --data ./new_data/pdac_updated.h5ad --retrain --output ./output_v2
 ### Pipeline Architecture
 
 ```
-┌─────────────────┐
-│  Load H5AD Data │  ← AnnData format with expression matrix
-└────────┬────────┘
-         │
-┌────────▼────────┐
-│  Preprocessing  │  ← Normalize, log transform, filter genes
-└────────┬────────┘
-         │
-┌────────▼────────┐
-│  Train/Load RF  │  ← Random Forest classifier
-└────────┬────────┘
-         │
-┌────────▼────────┐
-│   Evaluation    │  ← Metrics + confusion matrix
-└────────┬────────┘
-         │
-┌────────▼────────┐
-│    Analysis     │  ← Feature importances + diff. expression
-└────────┬────────┘
-         │
-┌────────▼────────┐
-│  Visualization  │  ← UMAP plots + bar charts
-└─────────────────┘
+GEO Datasets (3 studies)
+        │
+        ▼  python run.py convert
+  Per-dataset .h5ad files
+  (normalized, UMAP embedded)
+        │
+        ▼  python run.py merge
+  Combined .h5ad (3-class labels:
+  normal / precancerous / malignant)
+        │
+        ▼  python run.py run
+  3-class Random Forest model
+        │
+        ├── Feature importances (top biomarker genes)
+        ├── Differential expression (normal vs malignant)
+        └── UMAP plots (by condition, dataset, top genes)
 ```
 
-### Data Format
+### The 3-Class Condition Scheme
 
-Input data must be in **AnnData** (`.h5ad`) format with:
-- **`X`**: Gene expression matrix (cells × genes)
-- **`obs`**: Cell metadata including:
-  - `CONDITION`: Cell condition label (e.g., 'N' for normal, 'T' for tumor)
-  - `Cell_type` or `celltype3`: Cell type annotations (optional, for visualization)
-- **`var`**: Gene metadata with gene names
+Conditions from the three datasets are unified by `configs/condition_map.yaml`:
 
-### Processing Steps
+| Original label | Dataset | Unified class |
+|---------------|---------|---------------|
+| normal | GSE162708, GSE165399 | normal |
+| primary, primary_tumor | GSE154778, GSE162708 | malignant |
+| metastatic, metastasis | GSE154778, GSE162708 | malignant |
+| PASC | GSE165399 | malignant |
+| IPMN | GSE165399 | precancerous |
 
-1. **Data Loading**: Reads H5AD file and extracts expression matrix
-2. **Preprocessing**:
-   - Normalize total counts per cell
-   - Log-transform expression values
-   - Filter for highly variable genes
-   - Compute PCA and UMAP embeddings
-3. **Training**: Fits Random Forest classifier on 80% of data
-4. **Evaluation**: Tests on held-out 20% and reports metrics
-5. **Feature Analysis**:
-   - Ranks genes by feature importance
-   - Calculates mean expression ratios between conditions
-6. **Visualization**: Generates UMAP plots and feature importance charts
+### Key Dependencies
 
-## Output Structure
-
-```
-output/
-├── data/
-│   └── pdac_data.h5ad          # Downloaded/processed data
-├── model_artifact.joblib        # Trained model + metadata
-└── plots/
-    ├── umap_CONDITION.png       # UMAP colored by condition
-    ├── umap_Cell_type.png       # UMAP colored by cell type
-    ├── umap_gene_FXYD2.png      # Gene expression overlays
-    ├── umap_gene_CTRB1.png
-    └── feature_importances.png  # Top discriminating genes
-```
-
-### Understanding the Results
-
-**Feature Importances** show which genes are most important for distinguishing normal vs tumor cells:
-```
-FXYD2      0.026164
-CTRB1      0.021886
-CLPS       0.021697
-...
-```
-
-**Differential Expression** shows genes enriched in each condition:
-- **High ratios** (>1): Genes upregulated in tumor cells
-- **Low ratios** (<1): Genes upregulated in normal cells
-
-**UMAP plots** provide visual confirmation that:
-- Cells cluster by biological characteristics
-- The model captures meaningful biological variation
-
-## Project Structure
-
-```
-CellClassifier/
-├── cellclassifier/           # Main package
-│   ├── __init__.py
-│   ├── data.py              # Data loading & preprocessing
-│   ├── model.py             # Model training & evaluation
-│   ├── analysis.py          # Differential expression analysis
-│   └── plotting.py          # Visualization functions
-├── run.py                   # CLI entry point
-├── requirements.txt         # Python dependencies
-├── CLAUDE.md               # Development guidelines
-└── README.md               # This file
-```
-
-## Key Dependencies
-
-- **scanpy**: Single-cell analysis toolkit
-- **anndata**: Annotated data structures
-- **scikit-learn**: Machine learning (Random Forest)
-- **matplotlib/seaborn**: Plotting
-- **pandas/numpy**: Data manipulation
-- **gdown**: Google Drive downloads
+- **scanpy** — Single-cell analysis toolkit (preprocessing, UMAP, clustering)
+- **anndata** — AnnData format for single-cell data
+- **scikit-learn** — Random Forest classifier
+- **matplotlib** — Plotting
+- **pandas / numpy** — Data manipulation
+- **click** — CLI framework
+- **pyyaml** — YAML config loading
 
 ## Scientific Background
 
-### Cell Types
+### What is PDAC?
 
-The classifier focuses on pancreatic cells involved in PDAC:
-- **Normal cells**: Healthy pancreatic tissue
-- **Tumor cells**: Malignant PDAC cells
-- **Subtypes**: Alpha (glucagon), Beta (insulin), Delta (somatostatin) cells
+Pancreatic Ductal Adenocarcinoma (PDAC) is one of the most lethal cancers, with a 5-year survival rate under 15%. It is difficult to treat partly because it is hard to identify cancerous cells early and distinguish them from surrounding healthy tissue.
 
-### Biomarker Discovery
+### What is scRNA-seq?
 
-Feature importance analysis identifies genes like:
-- **FXYD2, FXYD3**: Ion transport proteins
-- **CTRB1, CLPS**: Digestive enzymes
-- **S100A4**: Cancer progression marker
+Single-cell RNA sequencing measures which genes are active in each individual cell. The output is a table where rows are cells and columns are genes. By training a classifier on this table, we can learn which gene patterns predict whether a cell is normal or cancerous.
 
-These genes represent potential therapeutic targets or diagnostic biomarkers for PDAC.
+### Why a Random Forest?
+
+Random Forests handle high-dimensional data (thousands of genes) well and provide **feature importances** — scores for each gene showing how much it helped the model. These top genes are candidate **biomarkers**: genes that reliably distinguish tumor from normal cells and could serve as diagnostic targets or drug targets.
 
 ## Troubleshooting
 
-**Issue**: `conda: command not found` warning
-- **Solution**: This is harmless if you're not using conda, or ensure conda is properly initialized in your shell
+**Barcode suffixes show as `null` in the YAML**
+Run `python run.py inspect --config configs/datasets/GSE154778.yaml` to see the actual suffix distribution, then fill in the values.
 
-**Issue**: Out of memory during processing
-- **Solution**: Reduce the dataset size or increase available RAM
+**`ValueError: Column 'condition' not found`**
+Run `convert` first to produce a processed `.h5ad` before running `run`.
 
-**Issue**: Google Drive download fails
-- **Solution**: Ensure the file is publicly shared and the ID is correct
+**Out of memory during processing**
+Reduce `n_top_genes` in the dataset YAML (e.g., from 2000 to 1000).
 
-<!-- ## Contributing
-
-Contributions are welcome! Please ensure code follows the project structure and includes appropriate documentation. -->
-
-<!-- ## License
-
-[Add your license here]
-
-## Citation
-
-If you use CellClassifier in your research, please cite:
-
-```bibtex
-[Add citation information]
-```
-
-## Contact
-
-[Add contact information or link to issues page] -->
+**Google Drive download fails**
+Ensure the file is publicly shared ("Anyone with the link can view").

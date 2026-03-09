@@ -75,6 +75,7 @@ class SampleConfig:
     id: str           # short human-readable name, e.g. "primary_tumor_1"
     condition: str    # biological condition, e.g. "primary", "metastatic", "normal"
     barcode_suffix: str | None = None   # the number after the "-" in a 10x barcode
+    barcode_prefix: str | None = None   # the part before ":" in "SAMPLE:INDEX" barcodes (e.g. "P03")
     gsm_id: str | None = None           # GEO sample accession, e.g. "GSM5032701"
     tissue_ontology_term_id: str | None = None   # overrides dataset-level tissue
     disease_ontology_term_id: str | None = None  # overrides dataset-level disease

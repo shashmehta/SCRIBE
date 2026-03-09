@@ -30,23 +30,22 @@ cellxgene:
   organism_ontology_term_id: "NCBITaxon:9606"
 
 # Each sample is identified by its GSM accession (prefix of the TXT filename).
-# TODO: verify GSM accession numbers against https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE165399
-# and update gsm_id values accordingly before running convert.
+# GSM accessions verified against https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE165399
 samples:
-  - id: "normal"
-    condition: "normal"
-    gsm_id: "GSM5032701"           # TODO: confirm on GEO
-    tissue_ontology_term_id: "UBERON:0001264"   # pancreas
-    disease_ontology_term_id: "PATO:0000461"    # normal
-
   - id: "IPMN"
     condition: "IPMN"
-    gsm_id: "GSM5032702"           # TODO: confirm on GEO
+    gsm_id: "GSM5032771"           # confirmed on GEO: "Sample 1_IPMN_ZX-2"
     tissue_ontology_term_id: "UBERON:0001264"   # pancreas
     disease_ontology_term_id: "MONDO:0005052"   # intraductal papillary mucinous neoplasm
 
   - id: "PASC"
     condition: "PASC"
-    gsm_id: "GSM5032703"           # TODO: confirm on GEO
+    gsm_id: "GSM5032772"           # confirmed on GEO: "Sample 2_PASC_ZX-3"
     tissue_ontology_term_id: "UBERON:0001264"   # pancreas
     disease_ontology_term_id: "MONDO:0003450"   # adenosquamous carcinoma
+
+  - id: "normal"
+    condition: "normal"
+    gsm_id: "GSM5032773"           # confirmed on GEO: "Sample 3_normal pancreas_ZX-4"
+    tissue_ontology_term_id: "UBERON:0001264"   # pancreas
+    disease_ontology_term_id: "PATO:0000461"    # normal

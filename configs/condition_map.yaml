@@ -1,0 +1,23 @@
+# Maps per-dataset condition labels to a unified 3-class scheme
+# used for combined RF training: normal / precancerous / malignant.
+#
+# GSE154778 conditions: primary, metastatic
+# GSE162708 conditions: primary_tumor, metastasis, normal
+# GSE165399 conditions: normal, IPMN, PASC
+
+# Normal tissue
+normal: normal
+
+# Primary tumors -> malignant
+primary: malignant
+primary_tumor: malignant
+
+# Metastatic tumors -> malignant
+metastatic: malignant
+metastasis: malignant
+
+# Adenosquamous carcinoma -> malignant
+PASC: malignant
+
+# Intraductal papillary mucinous neoplasm -> precancerous
+IPMN: precancerous

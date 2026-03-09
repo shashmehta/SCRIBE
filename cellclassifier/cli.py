@@ -58,6 +58,100 @@ def convert(config, output):
     geo.convert_dataset(cfg, out_dir)
 
 
+# ── inspect ───────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option(
+    "--config", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Dataset YAML config (e.g. configs/datasets/GSE154778.yaml).",
+)
+def inspect(config):
+    """Inspect barcodes in a raw dataset to determine sample demultiplexing.
+
+    Loads the raw data from the dataset config (without preprocessing) and
+    prints barcode suffix distributions, helping you fill in barcode_suffix
+    values in the YAML config.
+
+    Example:
+
+        python run.py inspect --config configs/datasets/GSE154778.yaml
+    """
+    cfg = load_dataset_config(config)
+    base = cfg.source.base_path
+    file_cfg = cfg.files[0]
+    abs_path = os.path.join(base, file_cfg.relative_path)
+
+    click.echo(f"\n=== Inspecting {cfg.id}: {cfg.title} ===")
+
+    # Load raw data without preprocessing
+    if file_cfg.format == "csv_dge":
+        adata = geo.load_csv_dge(abs_path)
+    elif file_cfg.format == "10x_mtx":
+        adata = geo.load_10x_mtx(abs_path, name_prefix=file_cfg.name_prefix)
+    elif file_cfg.format == "tar_txt_dge":
+        adata = geo.load_tar_txt_dge(abs_path)
+    elif file_cfg.format == "tar_10x":
+        adata = geo.load_tar_10x(abs_path)
+    else:
+        raise click.ClickException(f"Unknown file format: {file_cfg.format!r}")
+
+    import pandas as _pd
+
+    barcodes = adata.obs_names.tolist()
+    click.echo(f"\nTotal cells: {len(barcodes)}")
+    click.echo(f"Total genes: {adata.n_vars}")
+
+    # Show first 20 barcodes
+    click.echo(f"\nFirst 20 barcodes:")
+    for b in barcodes[:20]:
+        click.echo(f"  {b}")
+
+    # Detect separator: '-' (standard 10x) or ':' (e.g. GSE154778 "SAMPLE:INDEX" format)
+    has_dash  = any("-" in b for b in barcodes[:100])
+    has_colon = any(":" in b for b in barcodes[:100])
+
+    if has_colon and not has_dash:
+        # Prefix scheme: "P03:1" -> prefix "P03" identifies the sample
+        click.echo("\nDetected COLON-separated barcode format (prefix:index).")
+        prefixes = [b.split(":")[0] for b in barcodes]
+        prefix_counts = _pd.Series(prefixes).value_counts().sort_index()
+        click.echo(f"\nBarcode PREFIX distribution ({len(prefix_counts)} unique prefixes):")
+        click.echo("  -> Use barcode_prefix in the YAML (not barcode_suffix)")
+        for prefix, count in prefix_counts.items():
+            example = next(b for b in barcodes if b.startswith(f"{prefix}:"))
+            click.echo(f"  prefix '{prefix}': {count} cells  (e.g. {example})")
+        n_unique = len(prefix_counts)
+    elif has_dash:
+        # Suffix scheme: "ACGT-1" -> suffix "1" identifies the sample
+        click.echo("\nDetected DASH-separated barcode format (barcode-suffix).")
+        suffixes = [b.split("-")[-1] for b in barcodes]
+        suffix_counts = _pd.Series(suffixes).value_counts().sort_index()
+        click.echo(f"\nBarcode SUFFIX distribution ({len(suffix_counts)} unique suffixes):")
+        click.echo("  -> Use barcode_suffix in the YAML")
+        for suffix, count in suffix_counts.items():
+            examples = [b for b in barcodes if b.endswith(f"-{suffix}")][:1]
+            example = examples[0] if examples else "(none)"
+            click.echo(f"  suffix '{suffix}': {count} cells  (e.g. {example})")
+        n_unique = len(suffix_counts)
+    else:
+        click.echo("\nNo standard separator found — barcodes may already be unique per cell.")
+        n_unique = 1
+
+    # Show GSM IDs if present (from TAR loaders)
+    if "gsm_id" in adata.obs.columns:
+        click.echo(f"\nGSM ID distribution:")
+        for gsm, count in adata.obs["gsm_id"].value_counts().items():
+            click.echo(f"  {gsm}: {count} cells")
+
+    n_samples = len(cfg.samples)
+    click.echo(f"\nSummary: {n_unique} unique sample identifiers, config expects {n_samples} samples")
+    if n_unique == n_samples:
+        click.echo("Count matches — likely 1:1 mapping between identifiers and samples.")
+    else:
+        click.echo("Count does NOT match — inspect manually before filling in the YAML.")
+
+
 # ── train ─────────────────────────────────────────────────────────────────────
 
 @cli.command()
@@ -336,6 +430,56 @@ def run_pipeline(config, retrain, data_path, output):
     )
 
     click.echo("\nDone!")
+
+
+@cli.command()
+@click.option(
+    "--data", "data_paths", required=True, multiple=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Processed .h5ad file (repeat for each dataset).",
+)
+@click.option(
+    "--condition-map", "condition_map_path", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="YAML file mapping per-dataset conditions to unified labels.",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default="./output/combined",
+    help="Output directory for the combined .h5ad file.",
+)
+def merge(data_paths, condition_map_path, output):
+    """Merge multiple processed datasets into one combined .h5ad file.
+
+    Loads each dataset, remaps condition labels using the condition map,
+    intersects gene sets, concatenates, and re-runs preprocessing for
+    fresh embeddings. The combined file can then be used with `run` for
+    joint training.
+
+    Example:
+
+        python run.py merge \\
+            --data ./output/GSE154778_processed.h5ad \\
+            --data ./output/GSE162708_processed.h5ad \\
+            --data ./output/GSE165399_processed.h5ad \\
+            --condition-map configs/condition_map.yaml \\
+            --output ./output/combined
+    """
+    os.makedirs(output, exist_ok=True)
+
+    click.echo("\n=== Loading Condition Map ===")
+    cond_map = celldata.load_condition_map(condition_map_path)
+
+    click.echo("\n=== Merging Datasets ===")
+    combined = celldata.merge_datasets(list(data_paths), cond_map)
+
+    out_path = os.path.join(output, "combined_processed.h5ad")
+    combined.write_h5ad(out_path)
+    size_mb = os.path.getsize(out_path) / 1e6
+    click.echo(f"\nSaved combined dataset -> {out_path} ({size_mb:.1f} MB)")
+    click.echo(f"  {combined.n_obs} cells × {combined.n_vars} genes")
+    click.echo(f"  Conditions: {combined.obs['condition'].value_counts().to_dict()}")
 
 
 def main():
