@@ -413,6 +413,61 @@ class TestAssignSampleMetadata:
                                        dataset_disease="unknown")
         assert (adata.obs["sample"] == "unknown").all()
 
+    def test_barcode_prefix_strategy(self):
+        """Cells with 'P01:...' barcodes → Primary_T1; cells with 'MET01:...' → Metastatic_T1.
+
+        GSE154778 uses colon-separated barcodes like 'P01:1', 'MET01:1' where the
+        part BEFORE the colon identifies the sample. This is different from the
+        standard 10x format where the number AFTER the dash (e.g. '-1') identifies
+        the sample. We test that both groups are correctly labelled.
+        """
+        # Build barcodes in PREFIX:INDEX format — one group per sample
+        p01_barcodes = [f"P01:{i}" for i in range(N_CELLS)]
+        met01_barcodes = [f"MET01:{i}" for i in range(N_CELLS)]
+
+        adata_p01 = ad.AnnData(
+            X=sp.csr_matrix(_make_count_matrix()),
+            obs=pd.DataFrame(index=p01_barcodes),
+            var=pd.DataFrame(index=_gene_names()),
+        )
+        adata_met01 = ad.AnnData(
+            X=sp.csr_matrix(_make_count_matrix()),
+            obs=pd.DataFrame(index=met01_barcodes),
+            var=pd.DataFrame(index=_gene_names()),
+        )
+        adata = ad.concat([adata_p01, adata_met01])
+
+        samples = [
+            SampleConfig(id="Primary_T1",    condition="primary",    barcode_prefix="P01"),
+            SampleConfig(id="Metastatic_T1", condition="metastatic", barcode_prefix="MET01"),
+        ]
+        adata = assign_sample_metadata(adata, samples,
+                                       dataset_tissue="UBERON:0001264",
+                                       dataset_disease="unknown")
+
+        assert set(adata.obs["sample"].unique()) == {"Primary_T1", "Metastatic_T1"}
+        assert set(adata.obs["condition"].unique()) == {"primary", "metastatic"}
+        # Every P01:... cell should be labelled Primary_T1
+        p01_mask = adata.obs_names.str.startswith("P01:")
+        assert (adata.obs.loc[p01_mask, "sample"] == "Primary_T1").all()
+
+    def test_unmatched_prefix_gets_unknown(self):
+        """Barcodes whose prefix is not in the config should stay 'unknown'.
+
+        Same safety guarantee as the suffix strategy — any cell that cannot be
+        matched to a sample is flagged rather than silently mislabelled.
+        """
+        barcodes = [f"BADPREFIX:{i}" for i in range(N_CELLS)]
+        adata = ad.AnnData(
+            X=sp.csr_matrix(_make_count_matrix()),
+            obs=pd.DataFrame(index=barcodes),
+            var=pd.DataFrame(index=_gene_names()),
+        )
+        samples = [SampleConfig(id="P01", condition="primary", barcode_prefix="P01")]
+        adata = assign_sample_metadata(adata, samples, dataset_tissue="UBERON:0001264",
+                                       dataset_disease="unknown")
+        assert (adata.obs["sample"] == "unknown").all()
+
 
 # ── preprocess_adata ──────────────────────────────────────────────────────────
 

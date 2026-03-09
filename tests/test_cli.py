@@ -405,3 +405,308 @@ class TestRunCommand:
 
         assert mtime_second == mtime_first, "Artifact was unexpectedly overwritten"
         assert "Loading Existing Model" in result.output
+
+
+# ── inspect helpers ────────────────────────────────────────────────────────────
+# The inspect command loads RAW data from the filesystem path in the YAML config,
+# then prints barcode distributions. We write a minimal CSV DGE file with specific
+# barcode names, then point a dataset YAML at it so inspect can load it.
+
+def _write_csv_dge_with_barcodes(path: str, barcodes: list[str]) -> None:
+    """Write a gzip-compressed CSV DGE file with specific cell barcode column names.
+
+    CSV DGE format is genes × cells (rows = genes, columns = cells).
+    We only need real-looking structure — inspect reads obs_names (the barcodes),
+    not the expression values.
+    """
+    import gzip
+
+    rng = np.random.default_rng(99)
+    n_genes = 10
+    X = rng.integers(0, 100, size=(n_genes, len(barcodes)))
+    gene_names = [f"IGENE{i}" for i in range(n_genes)]
+    df = pd.DataFrame(X, index=gene_names, columns=barcodes)
+    with gzip.open(path, "wt") as f:
+        df.to_csv(f)
+
+
+def _make_inspect_yaml(tmp_path, barcodes: list[str], n_samples: int) -> str:
+    """Write a minimal dataset YAML and a matching CSV DGE file; return the YAML path.
+
+    The YAML's source.base_path and files[0].relative_path together form the
+    absolute path that the inspect command opens. n_samples controls how many
+    sample entries appear in the config (used for the '# samples expected' summary).
+    """
+    csv_path = tmp_path / "inspect_dge.csv.gz"
+    _write_csv_dge_with_barcodes(str(csv_path), barcodes)
+
+    cfg = {
+        "id": "GSE_INSPECT_TEST",
+        "title": "Inspect Test Dataset",
+        "description": "Synthetic data for testing the inspect command",
+        "source": {"type": "local", "base_path": str(tmp_path)},
+        "files": [{"format": "csv_dge", "relative_path": "inspect_dge.csv.gz"}],
+        "preprocessing": {
+            "min_genes": 1, "min_cells": 1, "mt_pct_threshold": 100,
+            "n_top_genes": 5, "n_pcs": 2, "leiden_resolution": 0.5,
+        },
+        "samples": [{"id": f"sample_{i}", "condition": "test"} for i in range(n_samples)],
+    }
+    yaml_path = tmp_path / "inspect_test.yaml"
+    yaml_path.write_text(yaml.dump(cfg))
+    return str(yaml_path)
+
+
+# ── inspect ────────────────────────────────────────────────────────────────────
+
+class TestInspectCommand:
+    """Tests for the 'inspect' subcommand.
+
+    The inspect command loads raw data from a dataset config and prints barcode
+    distributions to help the user figure out which barcode pattern maps to
+    which sample. It supports two formats:
+    - Dash-separated: 'ACGTACGT-1' (standard 10x Chromium barcodes)
+    - Colon-separated: 'P01:1' (used by GSE154778)
+
+    Each test uses its own tmp_path so they are fully independent.
+    """
+
+    def test_detects_dash_suffix_format(self, tmp_path):
+        """Barcodes like 'ACGTACGT-1' should trigger the dash-suffix path.
+
+        Standard 10x Chromium barcodes end with '-N' where N identifies the
+        sample (e.g. '-1' = sample 1, '-2' = sample 2). The inspect command
+        should print 'DASH-separated' and show the suffix count table.
+        """
+        barcodes = ([f"ACGT{i:04d}-1" for i in range(10)] +
+                    [f"ACGT{i:04d}-2" for i in range(10)])
+        yaml_path = _make_inspect_yaml(tmp_path, barcodes, n_samples=2)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["inspect", "--config", yaml_path])
+
+        assert result.exit_code == 0, result.output
+        assert "DASH" in result.output.upper()
+
+    def test_detects_colon_prefix_format(self, tmp_path):
+        """Barcodes like 'P01:1' should trigger the colon-prefix path.
+
+        GSE154778 uses 'PREFIX:INDEX' barcodes where the part BEFORE the colon
+        identifies the sample (e.g. 'P01' = primary tumor 1, 'MET01' = metastatic 1).
+        The inspect command should print 'COLON-separated'.
+        """
+        barcodes = ([f"P01:{i}" for i in range(10)] +
+                    [f"MET01:{i}" for i in range(10)])
+        yaml_path = _make_inspect_yaml(tmp_path, barcodes, n_samples=2)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["inspect", "--config", yaml_path])
+
+        assert result.exit_code == 0, result.output
+        assert "COLON" in result.output.upper()
+
+    def test_shows_correct_total_cell_count(self, tmp_path):
+        """The output must display the total number of cells that were loaded.
+
+        We write exactly 20 barcodes, so '20' must appear in the output.
+        Without this, the user can't confirm the file loaded correctly before
+        deciding which barcode_suffix or barcode_prefix values to put in the YAML.
+        """
+        barcodes = [f"CELL{i:03d}-1" for i in range(20)]
+        yaml_path = _make_inspect_yaml(tmp_path, barcodes, n_samples=1)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["inspect", "--config", yaml_path])
+
+        assert result.exit_code == 0, result.output
+        assert "20" in result.output
+
+    def test_missing_config_fails(self):
+        """A config path that does not exist should cause the command to fail.
+
+        Click validates the --config path before running any code. Failing fast
+        prevents the user from waiting for a slow file load that will never work.
+        """
+        runner = CliRunner()
+        result = runner.invoke(cli, ["inspect", "--config", "/nonexistent/path.yaml"])
+        assert result.exit_code != 0
+
+    def test_prefix_names_appear_in_output(self, tmp_path):
+        """The actual prefix strings from the barcodes must appear in the output.
+
+        If barcodes start with 'P01:' and 'MET01:', the user needs to see both
+        'P01' and 'MET01' listed so they know which barcode_prefix values to add
+        to their YAML config's samples section.
+        """
+        barcodes = ([f"P01:{i}" for i in range(5)] +
+                    [f"MET01:{i}" for i in range(5)])
+        yaml_path = _make_inspect_yaml(tmp_path, barcodes, n_samples=2)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["inspect", "--config", yaml_path])
+
+        assert result.exit_code == 0, result.output
+        assert "P01" in result.output
+        assert "MET01" in result.output
+
+
+# ── merge helpers + fixtures ───────────────────────────────────────────────────
+# merge_datasets runs PCA → UMAP → Leiden, which takes several seconds.
+# We use module-scoped fixtures to run the merge command ONCE and then check
+# different aspects of the output file in separate individual tests.
+
+# These constants are separate from the module-level N_CELLS/N_GENES to avoid
+# confusion with the existing run/train/evaluate synthetic data above.
+N_MERGE_CELLS = 60    # cells per dataset; 60 × 2 = 120 total after merging
+N_MERGE_GENES = 50    # genes per dataset; 40 overlap → 40 common genes
+RNG_MERGE = np.random.default_rng(13)
+
+
+def _make_merge_h5ad(path: str, gene_start: int, condition: str) -> None:
+    """Write a synthetic processed h5ad for merge command tests.
+
+    gene_start shifts which genes are included so two datasets with overlapping
+    ranges share a common gene subset. For example:
+      gene_start=0  → MGENE_000..049 (50 genes)
+      gene_start=10 → MGENE_010..059 (50 genes)
+    Intersection = MGENE_010..049 = 40 common genes.
+
+    We use standard-normal values to mimic already-scaled data, since
+    merge_datasets skips the normalisation step on pre-processed input.
+    """
+    genes = [f"MGENE_{i:03d}" for i in range(gene_start, gene_start + N_MERGE_GENES)]
+    X = RNG_MERGE.standard_normal((N_MERGE_CELLS, N_MERGE_GENES))
+    obs = pd.DataFrame(
+        {"condition": [condition] * N_MERGE_CELLS},
+        index=[f"{condition}_cell_{i}" for i in range(N_MERGE_CELLS)],
+    )
+    var = pd.DataFrame(index=genes)
+    adata = ad.AnnData(X=sp.csr_matrix(X), obs=obs, var=var)
+    adata.write_h5ad(path)
+
+
+@pytest.fixture(scope="module")
+def merge_shared_tmp(tmp_path_factory):
+    """Shared temp directory for all merge CLI tests."""
+    return tmp_path_factory.mktemp("merge_cli_tests")
+
+
+@pytest.fixture(scope="module")
+def merge_inputs(merge_shared_tmp):
+    """Write two processed h5ad files and a condition_map YAML; return their paths.
+
+    Dataset 1: genes MGENE_000..049, condition='primary'
+    Dataset 2: genes MGENE_010..059, condition='normal'
+    Common genes: MGENE_010..049 = 40 genes
+    condition_map: primary → malignant, normal → normal
+    """
+    path1 = str(merge_shared_tmp / "ds1.h5ad")
+    path2 = str(merge_shared_tmp / "ds2.h5ad")
+    _make_merge_h5ad(path1, gene_start=0,  condition="primary")
+    _make_merge_h5ad(path2, gene_start=10, condition="normal")
+
+    cmap = {"primary": "malignant", "normal": "normal"}
+    cmap_path = merge_shared_tmp / "cmap.yaml"
+    cmap_path.write_text(yaml.dump(cmap))
+
+    return path1, path2, str(cmap_path)
+
+
+@pytest.fixture(scope="module")
+def merge_result(merge_shared_tmp, merge_inputs):
+    """Run the merge command ONCE and return (CliRunner result, output directory).
+
+    Shared by test_exit_code_zero, test_combined_h5ad_created, test_cell_count,
+    test_conditions_remapped, and test_output_reports_cell_count — all check
+    different aspects of the same single merge invocation.
+    """
+    path1, path2, cmap_path = merge_inputs
+    out_dir = str(merge_shared_tmp / "merge_output")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "merge",
+        "--data", path1,
+        "--data", path2,
+        "--condition-map", cmap_path,
+        "--output", out_dir,
+    ])
+    return result, out_dir
+
+
+# ── merge ──────────────────────────────────────────────────────────────────────
+
+class TestMergeCommand:
+    """Tests for the 'merge' subcommand.
+
+    The merge command combines multiple processed h5ad files from different
+    datasets into one combined file. It remaps condition labels, keeps only
+    genes present in ALL datasets, and runs PCA/UMAP/Leiden for shared embeddings.
+    The output is 'combined_processed.h5ad' which can be fed directly into
+    'python run.py run' to train a classifier across all datasets at once.
+    """
+
+    def test_exit_code_zero(self, merge_result):
+        """The merge command must complete without errors (exit code 0)."""
+        result, _ = merge_result
+        assert result.exit_code == 0, result.output
+
+    def test_combined_h5ad_created(self, merge_result):
+        """The merge command must write 'combined_processed.h5ad' to the output directory.
+
+        Downstream steps look for exactly this filename. If it's missing or named
+        differently, 'python run.py run' will fail with a FileNotFoundError.
+        """
+        _, out_dir = merge_result
+        combined_path = os.path.join(out_dir, "combined_processed.h5ad")
+        assert os.path.exists(combined_path)
+
+    def test_combined_h5ad_has_correct_cell_count(self, merge_result):
+        """The written h5ad must contain cells from both input datasets.
+
+        We put 60 cells in each of 2 datasets, so the combined file must have
+        60 + 60 = 120 cells. If the merge silently dropped cells or failed to
+        concatenate correctly, the cell count would be wrong.
+        """
+        _, out_dir = merge_result
+        loaded = ad.read_h5ad(os.path.join(out_dir, "combined_processed.h5ad"))
+        assert loaded.n_obs == N_MERGE_CELLS * 2
+
+    def test_conditions_remapped_in_output(self, merge_result):
+        """The combined file must use unified labels, not the original per-dataset ones.
+
+        'primary' was mapped to 'malignant' by the condition map. After merging,
+        obs['condition'] should contain 'malignant' and 'normal' — not 'primary'.
+        Wrong condition labels would cause the classifier to learn the wrong classes.
+        """
+        _, out_dir = merge_result
+        loaded = ad.read_h5ad(os.path.join(out_dir, "combined_processed.h5ad"))
+        conditions = set(loaded.obs["condition"].unique())
+        assert "malignant" in conditions
+        assert "primary" not in conditions  # original label should be gone
+
+    def test_output_reports_cell_count(self, merge_result):
+        """The command's stdout must display the total number of cells in the merged file.
+
+        This lets the user confirm the merge without opening the h5ad file.
+        We wrote 120 cells total (60 + 60), so '120' should appear in the output.
+        """
+        result, _ = merge_result
+        assert "120" in result.output
+
+    def test_missing_condition_map_fails(self, merge_inputs):
+        """Omitting --condition-map must cause the command to fail.
+
+        Without a condition map, there is no way to unify labels across datasets.
+        Click marks --condition-map as required, so the command should exit with
+        a non-zero code rather than silently producing an incorrectly labelled file.
+        """
+        path1, path2, _ = merge_inputs
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "merge",
+            "--data", path1,
+            "--data", path2,
+            # intentionally omit --condition-map
+        ])
+        assert result.exit_code != 0

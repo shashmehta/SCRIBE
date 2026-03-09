@@ -9,7 +9,7 @@ data: "./output/GSE154778_processed.h5ad"
 output: "./output"
 
 # Name of the obs column that holds condition labels (e.g. "primary", "metastatic").
-condition_col: "CONDITION"
+condition_col: "condition"
 
 model:
   n_estimators: 100
@@ -23,8 +23,9 @@ analysis:
 plots:
   # obs columns to use for UMAP coloring. Only columns present in the data are plotted.
   umap_columns:
+    - "condition"
+    - "dataset"
     - "celltype3"
     - "Cell_type"
-    - "CONDITION"
   # Specific genes to overlay on UMAP. Empty list = top 2 from feature importances.
   umap_genes: []

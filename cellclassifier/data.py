@@ -1,13 +1,17 @@
 """Data loading, downloading, and preprocessing for PDAC classification."""
 
+from __future__ import annotations
+
 import os
+
+import anndata
 import numpy as np
 import pandas as pd
-import scipy.sparse
-import anndata
 import scanpy as sc
-from sklearn.preprocessing import LabelEncoder
+import scipy.sparse
+import yaml
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 
 
 def download_from_gdrive(file_id: str, dest_path: str) -> str:
@@ -128,3 +132,109 @@ def split_data(
     print(f"  Train: {X_train.shape[0]} samples, Test: {X_test.shape[0]} samples")
 
     return X_train, X_test, y_train, y_test
+
+
+def load_condition_map(yaml_path: str) -> dict[str, str]:
+    """Load a condition mapping YAML file.
+
+    The YAML maps per-dataset condition labels (e.g. "primary", "IPMN")
+    to a unified classification scheme (e.g. "malignant", "precancerous").
+
+    Args:
+        yaml_path: Path to the condition mapping YAML file.
+
+    Returns:
+        Dict mapping original condition strings to unified labels.
+    """
+    with open(yaml_path) as f:
+        raw = yaml.safe_load(f)
+    print(f"Loaded condition map ({len(raw)} entries) from {yaml_path}")
+    for orig, unified in raw.items():
+        print(f"  {orig} -> {unified}")
+    return raw
+
+
+def merge_datasets(
+    h5ad_paths: list[str],
+    condition_map: dict[str, str],
+    condition_col: str = "condition",
+) -> anndata.AnnData:
+    """Combine multiple processed h5ad files for joint training.
+
+    Loads each dataset, remaps condition labels to a unified scheme,
+    intersects gene sets, concatenates, and re-runs preprocessing so
+    embeddings are comparable across datasets.
+
+    Args:
+        h5ad_paths: Paths to processed .h5ad files.
+        condition_map: Maps per-dataset condition labels to unified labels
+            (e.g. {"primary": "malignant", "IPMN": "precancerous"}).
+        condition_col: Name of the obs column holding condition labels.
+
+    Returns:
+        Combined AnnData with unified condition labels and fresh embeddings.
+    """
+    adatas = []
+    for path in h5ad_paths:
+        print(f"\nLoading {path}...")
+        adata = sc.read_h5ad(path)
+        # Extract dataset ID from filename (e.g. "GSE154778_processed.h5ad" -> "GSE154778")
+        dataset_id = os.path.basename(path).replace("_processed.h5ad", "")
+        adata.obs["dataset"] = dataset_id
+
+        # Remap conditions to the unified scheme
+        if condition_col in adata.obs.columns:
+            original = adata.obs[condition_col].astype(str)
+            unified = original.map(condition_map)
+            # Cells with conditions not in the map keep their original label
+            unmapped = unified.isna()
+            if unmapped.any():
+                unmapped_vals = original[unmapped].unique().tolist()
+                print(f"  WARNING: unmapped conditions {unmapped_vals} — keeping original labels")
+                unified = unified.fillna(original)
+            adata.obs[condition_col] = unified.values
+        else:
+            print(f"  WARNING: column '{condition_col}' not found — skipping remap")
+
+        print(f"  {adata.n_obs} cells × {adata.n_vars} genes, dataset={dataset_id}")
+        print(f"  Conditions: {adata.obs[condition_col].value_counts().to_dict()}")
+        adatas.append(adata)
+
+    # Find the intersection of gene names across all datasets
+    common_genes = set(adatas[0].var_names)
+    for adata in adatas[1:]:
+        common_genes &= set(adata.var_names)
+    common_genes = sorted(common_genes)
+    print(f"\nCommon genes across {len(adatas)} datasets: {len(common_genes)}")
+
+    # Subset each AnnData to the common gene set
+    for i, adata in enumerate(adatas):
+        adatas[i] = adata[:, common_genes].copy()
+
+    # Concatenate all datasets into one AnnData
+    combined = anndata.concat(adatas, label="dataset_key", join="inner")
+    # Preserve the per-cell dataset column (concat may overwrite it)
+    if "dataset" not in combined.obs.columns:
+        combined.obs["dataset"] = combined.obs["dataset_key"]
+    print(f"\nCombined: {combined.n_obs} cells × {combined.n_vars} genes")
+    print(f"Datasets: {combined.obs['dataset'].value_counts().to_dict()}")
+    print(f"Conditions: {combined.obs[condition_col].value_counts().to_dict()}")
+
+    # The individual datasets are already normalized+log-transformed+scaled.
+    # We cannot re-run filter/normalize/HVG steps on scaled data — filter_cells
+    # would see all values as near-zero (the mean is 0 after scaling) and drop
+    # every cell. Instead, we just compute fresh joint embeddings (PCA → UMAP →
+    # Leiden) so cells from all three datasets are in the same coordinate space.
+    print("\nComputing joint embeddings (PCA → neighbors → UMAP → Leiden)...")
+    combined.var_names_make_unique()
+    combined.obs_names_make_unique()
+    sc.tl.pca(combined)
+    sc.pp.neighbors(combined, n_pcs=30)
+    sc.tl.umap(combined)
+    sc.tl.leiden(combined, resolution=0.5)
+    print(
+        f"  Done: {combined.n_obs} cells × {combined.n_vars} genes, "
+        f"{combined.obs['leiden'].nunique()} Leiden clusters"
+    )
+
+    return combined

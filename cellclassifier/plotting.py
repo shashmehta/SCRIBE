@@ -92,7 +92,7 @@ def generate_all_plots(
         importances: Top gene importances from the model.
         output_dir: Directory to save all plots.
         umap_color_columns: Obs columns for UMAP plots.
-            Defaults to ['celltype3', 'Cell_type', 'CONDITION'].
+            Defaults to ['condition', 'dataset', 'celltype3', 'Cell_type'].
         umap_genes: Genes to plot on UMAP. Defaults to top 2 important genes.
     """
     plots_dir = os.path.join(output_dir, "plots")
@@ -100,7 +100,7 @@ def generate_all_plots(
 
     # Default UMAP color columns — only use columns that exist in the data
     if umap_color_columns is None:
-        umap_color_columns = ["celltype3", "Cell_type", "CONDITION"]
+        umap_color_columns = ["condition", "dataset", "celltype3", "Cell_type"]
     umap_color_columns = [c for c in umap_color_columns if c in adata.obs.columns]  # Drop missing columns
 
     # Default gene list for UMAP — top 2 from feature importances

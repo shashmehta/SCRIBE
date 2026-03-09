@@ -279,9 +279,26 @@ def assign_sample_metadata(
 
     # Check which demultiplexing strategy the YAML config uses
     use_suffix = any(s.barcode_suffix is not None for s in samples)
+    use_prefix = any(s.barcode_prefix is not None for s in samples)
     use_gsm    = any(s.gsm_id is not None for s in samples)
 
-    if use_suffix:
+    if use_prefix:
+        # Build a lookup: prefix string → SampleConfig
+        # Barcodes are in "PREFIX:INDEX" format (e.g. "P03:1") — the prefix identifies the sample
+        prefix_map = {s.barcode_prefix: s for s in samples if s.barcode_prefix is not None}
+        obs_prefixes = np.array([
+            bc.split(":")[0] if ":" in bc else "" for bc in adata.obs_names
+        ])
+        for prefix, s in prefix_map.items():
+            mask = obs_prefixes == prefix  # True for every cell from this sample
+            sample_arr[mask]    = s.id
+            condition_arr[mask] = s.condition
+            if s.tissue_ontology_term_id:
+                tissue_arr[mask]  = s.tissue_ontology_term_id
+            if s.disease_ontology_term_id:
+                disease_arr[mask] = s.disease_ontology_term_id
+
+    elif use_suffix:
         # Build a lookup: suffix string → SampleConfig
         suffix_map = {s.barcode_suffix: s for s in samples if s.barcode_suffix is not None}
         # Extract the part after the last "-" in each barcode (e.g. "ACGT001-1" → "1")
