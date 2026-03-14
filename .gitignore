@@ -15,6 +15,9 @@ output/
 # Legacy model artifact
 model.joblib
 
+# Pytest
+.pytest_cache/
+
 # Jupyter checkpoints
 .ipynb_checkpoints/
 

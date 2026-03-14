@@ -29,11 +29,6 @@ python run.py --data ./data/pdac.h5ad --model ./output/model_artifact.joblib
 python run.py --data ./data/new.h5ad --retrain --output ./results_v2
 ```
 
-**Legacy files (kept for reference):**
-- `download_pdac_data.ipynb` — original Colab notebook (superseded by `run.py`)
-- `RFMouseHumanV2.py` — test script for cellxGene Census API
-- `DendrogramPlot.py` — incomplete dendrogram visualization
-
 ## Architecture
 
 The project is a Python package (`cellclassifier/`) with a CLI entry point (`run.py`):
@@ -41,11 +36,14 @@ The project is a Python package (`cellclassifier/`) with a CLI entry point (`run
 ```
 cellclassifier/
 ├── __init__.py      # Package marker
+├── cli.py           # Click CLI — convert, inspect, merge, train, evaluate, plot, run
+├── config.py        # YAML config dataclasses (Dataset, Pipeline)
 ├── data.py          # Data loading (local + Google Drive), preprocessing, train/test split
+├── geo.py           # GEO dataset loaders (CSV DGE, 10x MTX, TAR), cellxGene annotation
 ├── model.py         # RF training, evaluation, feature importances, save/load artifacts
 ├── analysis.py      # Differential expression: avg expression, ratios, top genes
 └── plotting.py      # UMAP plots, feature importance bar charts
-run.py               # CLI entry point — orchestrates the full pipeline
+run.py               # CLI entry point — delegates to cellclassifier.cli
 ```
 
 **Pipeline flow (run.py):**
@@ -63,6 +61,6 @@ run.py               # CLI entry point — orchestrates the full pipeline
 
 ## Key Domain Concepts
 
-- **cellxGene Census API** (`cellxgene_census`): CZI's API for querying single-cell datasets. Used in `RFMouseHumanV2.py` to fetch specific cell types by `cell_type` filter.
+- **cellxGene Census API** (`cellxgene_census`): CZI's API for querying single-cell datasets.
 - **scanpy pipeline**: `normalize_total` → `log1p` → `highly_variable_genes` → `pca` → `neighbors` is the standard preprocessing chain used throughout.
 - Pancreatic cell types of interest: A cells (alpha/glucagon), B cells (beta/insulin), D cells (delta/somatostatin).

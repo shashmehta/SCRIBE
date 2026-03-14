@@ -1,5 +1,0 @@
-Notes for Cell Classifier:
-
-    Datasets Found:
-        - https://cellxgene.cziscience.com/collections/72d37bc9-76cc-442d-9131-da0e273862db?utm_source=chatgpt.com
-        - https://cellxgene.cziscience.com/collections/0a77d4c0-d5d0-40f0-aa1a-5e1429bcbd7e?utm_source=chatgpt.com 
