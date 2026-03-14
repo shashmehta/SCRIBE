@@ -32,3 +32,15 @@ plots:
     - "Cell_type"
   # Specific genes to overlay on UMAP. Empty list = top 2 from feature importances.
   umap_genes: []
+
+batch:
+  batch_key: "dataset"
+  housekeeping_genes:
+    - "ACTB"
+    - "GAPDH"
+    - "B2M"
+    - "RPL13A"
+    - "RPLP0"
+    - "PPIA"
+  correction_method: "combat"    # combat (default, zero deps), harmony, scanorama, or all
+  n_neighbors_mixing: 50         # k for batch mixing score

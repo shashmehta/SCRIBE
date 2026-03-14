@@ -36,13 +36,14 @@ The project is a Python package (`cellclassifier/`) with a CLI entry point (`run
 ```
 cellclassifier/
 ├── __init__.py      # Package marker
-├── cli.py           # Click CLI — convert, inspect, merge, train, evaluate, plot, run
-├── config.py        # YAML config dataclasses (Dataset, Pipeline)
+├── cli.py           # Click CLI — convert, inspect, merge, build, batch-check, batch-correct, train, evaluate, plot, run
+├── config.py        # YAML config dataclasses (Dataset, Pipeline, BatchConfig)
 ├── data.py          # Data loading (local + Google Drive), preprocessing, train/test split
 ├── geo.py           # GEO dataset loaders (CSV DGE, 10x MTX, TAR), cellxGene annotation
 ├── model.py         # RF training, evaluation, feature importances, save/load artifacts
 ├── analysis.py      # Differential expression: avg expression, ratios, top genes
-└── plotting.py      # UMAP plots, feature importance bar charts
+├── batch.py         # Batch effect detection (housekeeping, mixing score) and correction (ComBat, Harmony, Scanorama)
+└── plotting.py      # UMAP plots, feature importance bar charts, batch diagnostic plots
 run.py               # CLI entry point — delegates to cellclassifier.cli
 ```
 
@@ -64,3 +65,39 @@ run.py               # CLI entry point — delegates to cellclassifier.cli
 - **cellxGene Census API** (`cellxgene_census`): CZI's API for querying single-cell datasets.
 - **scanpy pipeline**: `normalize_total` → `log1p` → `highly_variable_genes` → `pca` → `neighbors` is the standard preprocessing chain used throughout.
 - Pancreatic cell types of interest: A cells (alpha/glucagon), B cells (beta/insulin), D cells (delta/somatostatin).
+
+## Current Data Issues (Phase 2 findings — relevant for Phase 3)
+
+The unified dataset at `output/combined/combined_processed.h5ad` has 45,933 cells × 265 genes across 3 GEO datasets. Phase 2 batch analysis uncovered two significant issues that must inform Phase 3 classifier design:
+
+### 1. Condition–dataset confounding
+
+The biological conditions are not evenly distributed across datasets:
+
+| | GSE154778 | GSE162708 | GSE165399 |
+|---|---|---|---|
+| malignant | 14,924 | 9,441 | 2,113 |
+| normal | 0 | 12,497 | 939 |
+| precancerous | 0 | 0 | 6,019 |
+
+- GSE154778 contains **only** malignant cells
+- Precancerous cells come **exclusively** from GSE165399
+- Normal cells come only from GSE162708 and GSE165399
+
+This means batch correction cannot fully disentangle technical from biological effects, and **leave-one-dataset-out cross-validation is not feasible** (test folds would have missing classes). Phase 3 should use stratified k-fold CV with per-dataset accuracy breakdowns to detect batch overfitting.
+
+### 2. Small gene space after HVG intersection
+
+Each dataset independently selected its top 2,000 highly variable genes during preprocessing, then the merge intersected them — leaving only **265 shared genes**. Standard housekeeping genes (ACTB, GAPDH, etc.) were filtered out by HVG selection, so housekeeping-based batch quantification is not possible on the current combined data. The data was also independently scaled (zero-centered) per dataset before merging, which limits what post-hoc batch correction can achieve.
+
+### 3. Batch correction results
+
+- **ComBat**: Mixing score 0.129 → 0.136 (minimal improvement). Corrected file: `output/corrected/corrected_combat.h5ad`
+- **Harmony**: Mixing score 0.129 → 0.129 (no change), but silhouette improved -0.023 → 0.009. Corrected file: `output/corrected/corrected_harmony.h5ad`
+- Both methods had limited impact due to the confounding described above.
+
+### Implications for Phase 3
+
+- The classifier may learn dataset identity rather than true biological markers. **Per-dataset accuracy breakdowns** are essential.
+- Consider including `dataset` as a covariate or using domain-adversarial approaches.
+- Despite the confounding, cells from GSE162708 (which has both malignant and normal) do separate by condition, suggesting real biological signal exists.
