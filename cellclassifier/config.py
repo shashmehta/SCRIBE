@@ -122,6 +122,17 @@ class PlotsConfig:
 
 
 @dataclass
+class BatchConfig:
+    """Settings for batch effect detection and correction."""
+    batch_key: str = "dataset"              # obs column identifying the source dataset
+    housekeeping_genes: list[str] = field(  # genes for batch effect quantification
+        default_factory=lambda: ["ACTB", "GAPDH", "B2M", "RPL13A", "RPLP0", "PPIA"]
+    )
+    correction_method: str = "combat"       # default correction: combat, harmony, scanorama, or all
+    n_neighbors_mixing: int = 50            # k for batch mixing score computation
+
+
+@dataclass
 class PipelineConfig:
     """Everything needed to run the train → evaluate → plot pipeline."""
     data: str                    # path to the processed .h5ad file
@@ -131,6 +142,7 @@ class PipelineConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     plots: PlotsConfig = field(default_factory=PlotsConfig)
+    batch: BatchConfig = field(default_factory=BatchConfig)
 
 
 # ── Loaders ───────────────────────────────────────────────────────────────────
@@ -220,6 +232,7 @@ def load_pipeline_config(path: str) -> PipelineConfig:
     model = ModelConfig(**raw.get("model", {}))
     analysis = AnalysisConfig(**raw.get("analysis", {}))
     plots = PlotsConfig(**raw.get("plots", {}))
+    batch = BatchConfig(**raw.get("batch", {}))
 
     return PipelineConfig(
         data=raw["data"],
@@ -229,6 +242,7 @@ def load_pipeline_config(path: str) -> PipelineConfig:
         model=model,
         analysis=analysis,
         plots=plots,
+        batch=batch,
     )
 
 

@@ -17,6 +17,7 @@ from cellclassifier import data as celldata
 from cellclassifier import model as cellmodel
 from cellclassifier import analysis as cellanal
 from cellclassifier import plotting
+from cellclassifier import batch as cellbatch
 
 
 # @click.group() creates a parent command that groups sub-commands together.
@@ -568,6 +569,181 @@ def build(config_paths, condition_map_path, output, skip_convert, rebuild):
     click.echo(f"\nSaved combined dataset -> {out_path} ({size_mb:.1f} MB)")
     click.echo(f"  {combined.n_obs} cells × {combined.n_vars} genes")
     click.echo(f"  Conditions: {combined.obs['condition'].value_counts().to_dict()}")
+
+
+@cli.command("batch-check")
+@click.option(
+    "--data", "data_path", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to a combined/processed .h5ad file.",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default="./output/batch",
+    help="Output directory for batch diagnostic plots and reports.",
+)
+@click.option(
+    "--batch-key",
+    default="dataset",
+    help="Obs column identifying the batch (default: 'dataset').",
+)
+@click.option(
+    "--condition-col",
+    default="condition",
+    help="Obs column holding condition labels (default: 'condition').",
+)
+def batch_check(data_path, output, batch_key, condition_col):
+    """Diagnose batch effects in a combined dataset.
+
+    Computes housekeeping gene expression per batch, pairwise batch
+    distances, and a batch mixing score. Generates diagnostic heatmaps
+    and UMAP plots colored by batch vs condition.
+
+    Example:
+
+        python run.py batch-check --data ./output/combined/combined_processed.h5ad \\
+            --output ./output/batch
+    """
+    import scanpy as sc
+
+    os.makedirs(output, exist_ok=True)
+
+    click.echo("\n=== Loading Data ===")
+    adata = sc.read_h5ad(data_path)
+    click.echo(f"  {adata.n_obs} cells × {adata.n_vars} genes")
+    click.echo(f"  Batches ({batch_key}): {adata.obs[batch_key].value_counts().to_dict()}")
+
+    click.echo("\n=== Housekeeping Gene Expression ===")
+    try:
+        hk_expr = cellbatch.compute_housekeeping_expression(adata, batch_key)
+        click.echo(hk_expr.to_string())
+
+        # Save housekeeping heatmap
+        hk_path = os.path.join(output, "housekeeping_heatmap.png")
+        plotting.plot_housekeeping_heatmap(hk_expr, save_path=hk_path)
+        click.echo(f"  Saved -> {hk_path}")
+
+        click.echo("\n=== Pairwise Batch Distances ===")
+        distances = cellbatch.compute_batch_distances(adata, batch_key)
+        click.echo(distances.to_string())
+
+        # Save distance heatmap
+        dist_path = os.path.join(output, "batch_distances.png")
+        plotting.plot_batch_distance_heatmap(distances, save_path=dist_path)
+        click.echo(f"  Saved -> {dist_path}")
+    except ValueError as e:
+        click.echo(f"  WARNING: {e}")
+        click.echo("  Skipping housekeeping analysis (genes not found in dataset)")
+
+    click.echo("\n=== Batch Mixing Score ===")
+    # Ensure neighbors are computed
+    if "neighbors" not in adata.uns:
+        sc.pp.neighbors(adata, n_pcs=30)
+    mixing = cellbatch.compute_batch_mixing_score(adata, batch_key)
+    click.echo(f"  Mixing score: {mixing:.4f} (0=segregated, 1=perfectly mixed)")
+
+    click.echo("\n=== Batch UMAP ===")
+    # Ensure UMAP is computed
+    if "X_umap" not in adata.obsm:
+        sc.tl.umap(adata)
+    plotting.plot_batch_umap(adata, batch_key, condition_col, save_dir=output)
+
+    click.echo(f"\nBatch diagnostics saved to {output}/")
+
+
+@cli.command("batch-correct")
+@click.option(
+    "--data", "data_path", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to a combined/processed .h5ad file.",
+)
+@click.option(
+    "--method",
+    type=click.Choice(["combat", "harmony", "scanorama", "all"], case_sensitive=False),
+    default="combat",
+    help="Batch correction method (default: combat).",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default="./output/corrected",
+    help="Output directory for corrected .h5ad files and comparison plots.",
+)
+@click.option(
+    "--batch-key",
+    default="dataset",
+    help="Obs column identifying the batch (default: 'dataset').",
+)
+def batch_correct(data_path, method, output, batch_key):
+    """Apply batch correction to a combined dataset.
+
+    Corrects batch effects using ComBat (default), Harmony, Scanorama,
+    or all three. Saves corrected .h5ad files and comparison plots.
+
+    Example:
+
+        python run.py batch-correct --data ./output/combined/combined_processed.h5ad \\
+            --method combat --output ./output/corrected
+    """
+    import scanpy as sc
+
+    os.makedirs(output, exist_ok=True)
+
+    click.echo("\n=== Loading Data ===")
+    adata = sc.read_h5ad(data_path)
+    click.echo(f"  {adata.n_obs} cells × {adata.n_vars} genes")
+
+    methods = ["combat", "harmony", "scanorama"] if method == "all" else [method]
+    corrections = {}
+
+    for m in methods:
+        click.echo(f"\n=== Applying {m.upper()} Correction ===")
+        try:
+            if m == "combat":
+                corrected = cellbatch.correct_batch_combat(adata, batch_key)
+            elif m == "harmony":
+                corrected = cellbatch.correct_batch_harmony(adata, batch_key)
+            elif m == "scanorama":
+                corrected = cellbatch.correct_batch_scanorama(adata, batch_key)
+            else:
+                continue
+
+            # Save corrected h5ad
+            out_path = os.path.join(output, f"corrected_{m}.h5ad")
+            corrected.write_h5ad(out_path)
+            size_mb = os.path.getsize(out_path) / 1e6
+            click.echo(f"  Saved -> {out_path} ({size_mb:.1f} MB)")
+
+            # Report mixing score
+            mixing = cellbatch.compute_batch_mixing_score(corrected, batch_key)
+            click.echo(f"  Mixing score: {mixing:.4f}")
+
+            corrections[m] = corrected
+        except ImportError as e:
+            click.echo(f"  SKIPPED: {e}")
+        except Exception as e:
+            click.echo(f"  ERROR: {e}")
+
+    # Generate comparison plots if we have results
+    if corrections:
+        click.echo("\n=== Generating Comparison Plots ===")
+        umaps_dict = {"uncorrected": adata}
+        umaps_dict.update(corrections)
+        plotting.plot_batch_correction_comparison(umaps_dict, batch_key, save_dir=output)
+
+        # If multiple methods, generate comparison table
+        if len(corrections) > 1 or True:
+            click.echo("\n=== Method Comparison ===")
+            comparison = cellbatch.compare_corrections(adata, corrections, batch_key)
+            click.echo(comparison.to_string())
+
+            # Save comparison CSV
+            csv_path = os.path.join(output, "correction_comparison.csv")
+            comparison.to_csv(csv_path)
+            click.echo(f"  Saved -> {csv_path}")
+
+    click.echo(f"\nBatch correction results saved to {output}/")
 
 
 def main():

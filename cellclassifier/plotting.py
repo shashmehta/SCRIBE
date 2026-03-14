@@ -1,12 +1,14 @@
 """Visualization functions for UMAP plots and feature importance charts."""
 
 import os
+import numpy as np
 import pandas as pd
 import scanpy as sc
 import anndata
 import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend for saving plots (no screen needed)
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 def plot_umap(
@@ -144,6 +146,130 @@ def plot_heatmap_dendrogram(
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
+    else:
+        plt.show()
+
+
+def plot_batch_umap(
+    adata: anndata.AnnData,
+    batch_key: str = "dataset",
+    condition_col: str = "condition",
+    save_dir: str | None = None,
+) -> None:
+    """Side-by-side UMAPs colored by batch vs condition.
+
+    Helps visually assess whether cells cluster by batch (bad — technical
+    artifact) or by condition (good — biological signal).
+
+    Args:
+        adata: AnnData with pre-computed UMAP.
+        batch_key: Obs column for batch identity.
+        condition_col: Obs column for biological condition.
+        save_dir: Directory to save the figure. If None, display interactively.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+    # Left panel: colored by batch
+    sc.pl.umap(adata, color=batch_key, ax=axes[0], show=False, title=f"Colored by {batch_key}")
+
+    # Right panel: colored by condition
+    if condition_col in adata.obs.columns:
+        sc.pl.umap(adata, color=condition_col, ax=axes[1], show=False, title=f"Colored by {condition_col}")
+    else:
+        axes[1].set_title(f"{condition_col} not found")
+
+    plt.tight_layout()
+
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        path = os.path.join(save_dir, "batch_vs_condition_umap.png")
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved batch UMAP -> {path}")
+    else:
+        plt.show()
+
+
+def plot_housekeeping_heatmap(
+    hk_df: pd.DataFrame,
+    save_path: str | None = None,
+) -> None:
+    """Heatmap of housekeeping gene expression across batches.
+
+    Housekeeping genes should be uniformly expressed. Large differences
+    between rows (batches) indicate technical batch effects.
+
+    Args:
+        hk_df: DataFrame with batches as rows, genes as columns.
+        save_path: Path to save the figure. If None, display interactively.
+    """
+    fig, ax = plt.subplots(figsize=(10, max(4, len(hk_df) * 0.8)))
+    sns.heatmap(hk_df, annot=True, fmt=".2f", cmap="YlOrRd", ax=ax)
+    ax.set_title("Housekeeping Gene Expression by Batch", fontsize=14, pad=15)
+    ax.set_ylabel("Batch")
+    ax.set_xlabel("Gene")
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_batch_distance_heatmap(
+    distances: pd.DataFrame,
+    save_path: str | None = None,
+) -> None:
+    """Heatmap of pairwise Euclidean distances between batches.
+
+    Args:
+        distances: Symmetric DataFrame of pairwise distances.
+        save_path: Path to save the figure. If None, display interactively.
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(distances, annot=True, fmt=".2f", cmap="Blues", ax=ax, square=True)
+    ax.set_title("Pairwise Batch Distances (Housekeeping Genes)", fontsize=14, pad=15)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_batch_correction_comparison(
+    umaps_dict: dict[str, anndata.AnnData],
+    batch_key: str = "dataset",
+    save_dir: str | None = None,
+) -> None:
+    """Grid of UMAPs comparing uncorrected and corrected datasets.
+
+    Args:
+        umaps_dict: Dict mapping method name (e.g. "uncorrected", "combat")
+            to AnnData objects with pre-computed UMAP.
+        batch_key: Obs column for batch identity.
+        save_dir: Directory to save the figure. If None, display interactively.
+    """
+    n = len(umaps_dict)
+    fig, axes = plt.subplots(1, n, figsize=(7 * n, 6))
+    if n == 1:
+        axes = [axes]
+
+    for ax, (name, adata) in zip(axes, umaps_dict.items()):
+        sc.pl.umap(adata, color=batch_key, ax=ax, show=False, title=name)
+
+    plt.tight_layout()
+
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        path = os.path.join(save_dir, "batch_correction_comparison.png")
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved correction comparison -> {path}")
     else:
         plt.show()
 
