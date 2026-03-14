@@ -74,6 +74,80 @@ def plot_feature_importances(
         plt.show()
 
 
+def plot_dendrogram(
+    adata: anndata.AnnData,
+    groupby: str,
+    save_path: str | None = None,
+) -> None:
+    """Generate a dendrogram showing hierarchical clustering of cell groups.
+
+    Uses scanpy's dendrogram tool which clusters groups based on PCA
+    coordinates, showing which cell populations are most similar.
+
+    Args:
+        adata: AnnData object with pre-computed PCA.
+        groupby: Obs column to group cells by (e.g. 'condition', 'dataset').
+        save_path: If provided, save the figure. Otherwise display.
+    """
+    # Compute the dendrogram grouping (stored in adata.uns)
+    sc.tl.dendrogram(adata, groupby=groupby)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sc.pl.dendrogram(adata, groupby=groupby, ax=ax, show=False)
+    ax.set_title(f"Dendrogram grouped by {groupby}", fontsize=14, pad=15)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_heatmap_dendrogram(
+    adata: anndata.AnnData,
+    groupby: str,
+    n_genes: int = 10,
+    save_path: str | None = None,
+) -> None:
+    """Generate a heatmap with dendrogram showing top marker genes per group.
+
+    Combines hierarchical clustering (dendrogram) with a gene expression
+    heatmap, so you can see both which groups are similar and which genes
+    drive the differences.
+
+    Args:
+        adata: AnnData object with pre-computed PCA.
+        groupby: Obs column to group cells by (e.g. 'condition', 'dataset').
+        n_genes: Number of top marker genes per group to display.
+        save_path: If provided, save the figure. Otherwise display.
+    """
+    # Compute dendrogram if not already present
+    dendrogram_key = f"dendrogram_{groupby}"
+    if dendrogram_key not in adata.uns:
+        sc.tl.dendrogram(adata, groupby=groupby)
+
+    # Rank genes per group to find markers
+    sc.tl.rank_genes_groups(adata, groupby=groupby, method="wilcoxon")
+
+    sc.pl.rank_genes_groups_heatmap(
+        adata,
+        groupby=groupby,
+        n_genes=n_genes,
+        dendrogram=True,
+        show=False,
+        figsize=(14, 8),
+    )
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+    else:
+        plt.show()
+
+
 def generate_all_plots(
     adata: anndata.AnnData,
     importances: pd.Series,
