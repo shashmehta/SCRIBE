@@ -158,6 +158,7 @@ def merge_datasets(
     h5ad_paths: list[str],
     condition_map: dict[str, str],
     condition_col: str = "condition",
+    batch_key: str = "dataset",
 ) -> anndata.AnnData:
     """Combine multiple processed h5ad files for joint training.
 
@@ -170,6 +171,7 @@ def merge_datasets(
         condition_map: Maps per-dataset condition labels to unified labels
             (e.g. {"primary": "malignant", "IPMN": "precancerous"}).
         condition_col: Name of the obs column holding condition labels.
+        batch_key: Name of the obs column tracking dataset origin.
 
     Returns:
         Combined AnnData with unified condition labels and fresh embeddings.
@@ -180,7 +182,7 @@ def merge_datasets(
         adata = sc.read_h5ad(path)
         # Extract dataset ID from filename (e.g. "GSE154778_processed.h5ad" -> "GSE154778")
         dataset_id = os.path.basename(path).replace("_processed.h5ad", "")
-        adata.obs["dataset"] = dataset_id
+        adata.obs[batch_key] = dataset_id
 
         # Remap conditions to the unified scheme
         if condition_col in adata.obs.columns:
@@ -196,7 +198,7 @@ def merge_datasets(
         else:
             print(f"  WARNING: column '{condition_col}' not found — skipping remap")
 
-        print(f"  {adata.n_obs} cells × {adata.n_vars} genes, dataset={dataset_id}")
+        print(f"  {adata.n_obs} cells × {adata.n_vars} genes, {batch_key}={dataset_id}")
         print(f"  Conditions: {adata.obs[condition_col].value_counts().to_dict()}")
         adatas.append(adata)
 
@@ -213,11 +215,14 @@ def merge_datasets(
 
     # Concatenate all datasets into one AnnData
     combined = anndata.concat(adatas, label="dataset_key", join="inner")
-    # Preserve the per-cell dataset column (concat may overwrite it)
-    if "dataset" not in combined.obs.columns:
-        combined.obs["dataset"] = combined.obs["dataset_key"]
+    # Preserve the per-cell batch_key column (concat may overwrite it)
+    if batch_key not in combined.obs.columns:
+        combined.obs[batch_key] = combined.obs["dataset_key"]
+    # Ensure sample column survives concatenation (populated by geo.assign_sample_metadata)
+    if "sample" not in combined.obs.columns and "sample_id" in combined.obs.columns:
+        combined.obs["sample"] = combined.obs["sample_id"]
     print(f"\nCombined: {combined.n_obs} cells × {combined.n_vars} genes")
-    print(f"Datasets: {combined.obs['dataset'].value_counts().to_dict()}")
+    print(f"Datasets: {combined.obs[batch_key].value_counts().to_dict()}")
     print(f"Conditions: {combined.obs[condition_col].value_counts().to_dict()}")
 
     # The individual datasets are already normalized+log-transformed+scaled.

@@ -11,6 +11,9 @@ output: "./output"
 # Name of the obs column that holds condition labels (e.g. "primary", "metastatic").
 condition_col: "condition"
 
+# Name of the obs column identifying the source dataset (used for batch correction).
+batch_key: "dataset"
+
 model:
   n_estimators: 100
   class_weight: "balanced"   # handles class imbalance between conditions
