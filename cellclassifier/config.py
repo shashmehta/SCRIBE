@@ -127,6 +127,7 @@ class PipelineConfig:
     data: str                    # path to the processed .h5ad file
     output: str = "./output"     # where to write the model, plots, and results
     condition_col: str = "CONDITION"  # obs column that holds the class labels
+    batch_key: str = "dataset"   # obs column identifying the source dataset (for batch correction)
     model: ModelConfig = field(default_factory=ModelConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     plots: PlotsConfig = field(default_factory=PlotsConfig)
@@ -224,6 +225,7 @@ def load_pipeline_config(path: str) -> PipelineConfig:
         data=raw["data"],
         output=raw.get("output", "./output"),
         condition_col=raw.get("condition_col", "CONDITION"),
+        batch_key=raw.get("batch_key", "dataset"),
         model=model,
         analysis=analysis,
         plots=plots,

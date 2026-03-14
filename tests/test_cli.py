@@ -710,3 +710,187 @@ class TestMergeCommand:
             # intentionally omit --condition-map
         ])
         assert result.exit_code != 0
+
+
+# ── build helpers + fixtures ─────────────────────────────────────────────────
+# The build command chains convert + merge. We create minimal dataset YAML
+# configs with synthetic CSV DGE files so convert_dataset() can run quickly.
+
+N_BUILD_CELLS = 40    # cells per dataset; small for fast tests
+N_BUILD_GENES = 30    # genes per dataset
+RNG_BUILD = np.random.default_rng(77)
+
+
+def _make_build_csv_dge(path: str, gene_names: list[str], barcodes: list[str]) -> None:
+    """Write a gzip-compressed CSV DGE file (genes × cells) for build command tests."""
+    import gzip
+
+    X = RNG_BUILD.negative_binomial(5, 0.5, (len(gene_names), len(barcodes)))
+    # Inject 2 MT genes for QC filtering to work
+    df = pd.DataFrame(X, index=gene_names, columns=barcodes)
+    with gzip.open(path, "wt") as f:
+        df.to_csv(f)
+
+
+def _make_build_dataset_yaml(
+    tmp_path, dataset_id: str, csv_filename: str, condition: str, barcodes: list[str],
+) -> str:
+    """Write a dataset YAML config and matching CSV DGE file; return the YAML path."""
+    gene_names = [f"BGENE{i:03d}" for i in range(N_BUILD_GENES - 2)] + ["MT-CO1", "MT-CO2"]
+    csv_path = tmp_path / csv_filename
+    _make_build_csv_dge(str(csv_path), gene_names, barcodes)
+
+    cfg = {
+        "id": dataset_id,
+        "title": f"Build Test {dataset_id}",
+        "description": f"Synthetic dataset for testing build command ({dataset_id})",
+        "source": {"type": "local", "base_path": str(tmp_path)},
+        "files": [{"format": "csv_dge", "relative_path": csv_filename}],
+        "preprocessing": {
+            "min_genes": 1, "min_cells": 1, "mt_pct_threshold": 100,
+            "n_top_genes": 20, "n_pcs": 5, "leiden_resolution": 0.5,
+        },
+        "cellxgene": {
+            "assay_ontology_term_id": "EFO:0009922",
+            "disease_ontology_term_id": "MONDO:0006047",
+            "tissue_ontology_term_id": "UBERON:0001264",
+            "organism_ontology_term_id": "NCBITaxon:9606",
+        },
+        "samples": [{"id": f"{dataset_id}_sample", "condition": condition, "barcode_suffix": "1"}],
+    }
+    yaml_path = tmp_path / f"{dataset_id}.yaml"
+    yaml_path.write_text(yaml.dump(cfg))
+    return str(yaml_path)
+
+
+@pytest.fixture(scope="module")
+def build_shared_tmp(tmp_path_factory):
+    """Shared temp directory for all build CLI tests."""
+    return tmp_path_factory.mktemp("build_cli_tests")
+
+
+@pytest.fixture(scope="module")
+def build_inputs(build_shared_tmp):
+    """Create 2 dataset YAMLs with CSV DGE files and a condition map; return paths.
+
+    Dataset 1: 40 cells, condition='primary'
+    Dataset 2: 40 cells, condition='normal'
+    condition_map: primary → malignant, normal → normal
+    """
+    barcodes1 = [f"CELL{i:03d}-1" for i in range(N_BUILD_CELLS)]
+    barcodes2 = [f"CELL{i:03d}-1" for i in range(N_BUILD_CELLS)]
+
+    yaml1 = _make_build_dataset_yaml(
+        build_shared_tmp, "BUILD_DS1", "ds1_dge.csv.gz", "primary", barcodes1,
+    )
+    yaml2 = _make_build_dataset_yaml(
+        build_shared_tmp, "BUILD_DS2", "ds2_dge.csv.gz", "normal", barcodes2,
+    )
+
+    cmap = {"primary": "malignant", "normal": "normal"}
+    cmap_path = build_shared_tmp / "build_cmap.yaml"
+    cmap_path.write_text(yaml.dump(cmap))
+
+    return yaml1, yaml2, str(cmap_path)
+
+
+@pytest.fixture(scope="module")
+def build_result(build_shared_tmp, build_inputs):
+    """Run the build command ONCE and return (CliRunner result, output directory).
+
+    Shared by all TestBuildCommand tests so the expensive convert + merge
+    pipeline only runs once.
+    """
+    yaml1, yaml2, cmap_path = build_inputs
+    out_dir = str(build_shared_tmp / "build_output")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "build",
+        "--config", yaml1,
+        "--config", yaml2,
+        "--condition-map", cmap_path,
+        "--output", out_dir,
+    ])
+    return result, out_dir
+
+
+# ── build ────────────────────────────────────────────────────────────────────
+
+class TestBuildCommand:
+    """Tests for the 'build' subcommand.
+
+    The build command chains convert + merge into a single step: it converts
+    each dataset YAML to a processed .h5ad, then merges them all with a
+    condition map into one combined_processed.h5ad.
+    """
+
+    def test_exit_code_zero(self, build_result):
+        """The build command must complete without errors."""
+        result, _ = build_result
+        assert result.exit_code == 0, result.output
+
+    def test_combined_h5ad_created(self, build_result):
+        """Build must produce combined_processed.h5ad in the output directory."""
+        _, out_dir = build_result
+        assert os.path.exists(os.path.join(out_dir, "combined_processed.h5ad"))
+
+    def test_per_dataset_h5ad_created(self, build_result):
+        """Build must produce individual processed .h5ad files for each dataset."""
+        _, out_dir = build_result
+        assert os.path.exists(os.path.join(out_dir, "BUILD_DS1_processed.h5ad"))
+        assert os.path.exists(os.path.join(out_dir, "BUILD_DS2_processed.h5ad"))
+
+    def test_combined_has_dataset_column(self, build_result):
+        """The combined .h5ad must have a 'dataset' column tracking origin."""
+        _, out_dir = build_result
+        combined = ad.read_h5ad(os.path.join(out_dir, "combined_processed.h5ad"))
+        assert "dataset" in combined.obs.columns
+
+    def test_combined_has_condition_column(self, build_result):
+        """The combined .h5ad must have a 'condition' column with unified labels."""
+        _, out_dir = build_result
+        combined = ad.read_h5ad(os.path.join(out_dir, "combined_processed.h5ad"))
+        assert "condition" in combined.obs.columns
+        conditions = set(combined.obs["condition"].unique())
+        assert "malignant" in conditions
+        assert "normal" in conditions
+
+    def test_combined_has_cells_from_both(self, build_result):
+        """The combined .h5ad must contain cells from both input datasets."""
+        _, out_dir = build_result
+        combined = ad.read_h5ad(os.path.join(out_dir, "combined_processed.h5ad"))
+        datasets = set(combined.obs["dataset"].unique())
+        assert len(datasets) == 2
+
+    def test_skip_convert_flag(self, build_shared_tmp, build_inputs, build_result):
+        """--skip-convert should skip the convert step when .h5ad files exist.
+
+        We run build a second time with --skip-convert. The output should
+        mention 'Skipping' and still produce a valid combined file.
+        """
+        yaml1, yaml2, cmap_path = build_inputs
+        _, out_dir = build_result  # ensure first build has run
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "build",
+            "--config", yaml1,
+            "--config", yaml2,
+            "--condition-map", cmap_path,
+            "--output", out_dir,
+            "--skip-convert",
+        ])
+        assert result.exit_code == 0, result.output
+        assert "Skipping" in result.output
+
+    def test_missing_condition_map_fails(self, build_inputs):
+        """Omitting --condition-map must cause the command to fail."""
+        yaml1, yaml2, _ = build_inputs
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "build",
+            "--config", yaml1,
+            "--config", yaml2,
+        ])
+        assert result.exit_code != 0

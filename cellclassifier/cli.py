@@ -482,6 +482,75 @@ def merge(data_paths, condition_map_path, output):
     click.echo(f"  Conditions: {combined.obs['condition'].value_counts().to_dict()}")
 
 
+@cli.command()
+@click.option(
+    "--config", "config_paths", required=True, multiple=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Dataset YAML config (repeat for each dataset).",
+)
+@click.option(
+    "--condition-map", "condition_map_path", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="YAML file mapping per-dataset conditions to unified labels.",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default="./output/combined",
+    help="Output directory for the combined .h5ad file.",
+)
+@click.option(
+    "--skip-convert", is_flag=True, default=False,
+    help="Skip the convert step if processed .h5ad files already exist.",
+)
+def build(config_paths, condition_map_path, output, skip_convert):
+    """Convert all datasets and merge into a single unified AnnData.
+
+    Chains the convert and merge steps into one command: for each --config,
+    runs convert_dataset() to produce a processed .h5ad, then merges all
+    processed files using the condition map.
+
+    Example:
+
+        python run.py build \\
+            --config configs/datasets/GSE154778.yaml \\
+            --config configs/datasets/GSE162708.yaml \\
+            --config configs/datasets/GSE165399.yaml \\
+            --condition-map configs/condition_map.yaml \\
+            --output ./output/combined
+    """
+    os.makedirs(output, exist_ok=True)
+
+    # Step 1: Convert each dataset to a processed .h5ad
+    h5ad_paths = []
+    for cfg_path in config_paths:
+        cfg = load_dataset_config(cfg_path)
+        h5ad_name = f"{cfg.id}_processed.h5ad"
+        h5ad_out = os.path.join(output, h5ad_name)
+
+        if skip_convert and os.path.exists(h5ad_out):
+            click.echo(f"\nSkipping convert for {cfg.id} — {h5ad_out} already exists")
+        else:
+            click.echo(f"\n=== Converting {cfg.id} ===")
+            geo.convert_dataset(cfg, output)
+
+        h5ad_paths.append(h5ad_out)
+
+    # Step 2: Load condition map and merge
+    click.echo("\n=== Loading Condition Map ===")
+    cond_map = celldata.load_condition_map(condition_map_path)
+
+    click.echo("\n=== Merging Datasets ===")
+    combined = celldata.merge_datasets(h5ad_paths, cond_map)
+
+    out_path = os.path.join(output, "combined_processed.h5ad")
+    combined.write_h5ad(out_path)
+    size_mb = os.path.getsize(out_path) / 1e6
+    click.echo(f"\nSaved combined dataset -> {out_path} ({size_mb:.1f} MB)")
+    click.echo(f"  {combined.n_obs} cells × {combined.n_vars} genes")
+    click.echo(f"  Conditions: {combined.obs['condition'].value_counts().to_dict()}")
+
+
 def main():
     """Entry point called by run.py and the `cellclassifier` console script."""
     cli()
