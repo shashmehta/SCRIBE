@@ -503,12 +503,20 @@ def merge(data_paths, condition_map_path, output):
     "--skip-convert", is_flag=True, default=False,
     help="Skip the convert step if processed .h5ad files already exist.",
 )
-def build(config_paths, condition_map_path, output, skip_convert):
+@click.option(
+    "--rebuild", is_flag=True, default=False,
+    help="Force rebuild even if combined_processed.h5ad already exists.",
+)
+def build(config_paths, condition_map_path, output, skip_convert, rebuild):
     """Convert all datasets and merge into a single unified AnnData.
 
     Chains the convert and merge steps into one command: for each --config,
     runs convert_dataset() to produce a processed .h5ad, then merges all
     processed files using the condition map.
+
+    If combined_processed.h5ad already exists in the output directory, the
+    command skips everything and reuses it. Pass --rebuild to force a fresh
+    build.
 
     Example:
 
@@ -520,6 +528,18 @@ def build(config_paths, condition_map_path, output, skip_convert):
             --output ./output/combined
     """
     os.makedirs(output, exist_ok=True)
+    out_path = os.path.join(output, "combined_processed.h5ad")
+
+    # If the combined file already exists and --rebuild was not passed, reuse it
+    if not rebuild and os.path.exists(out_path):
+        import scanpy as sc
+        size_mb = os.path.getsize(out_path) / 1e6
+        click.echo(f"\nCombined dataset already exists: {out_path} ({size_mb:.1f} MB)")
+        combined = sc.read_h5ad(out_path)
+        click.echo(f"  {combined.n_obs} cells × {combined.n_vars} genes")
+        click.echo(f"  Conditions: {combined.obs['condition'].value_counts().to_dict()}")
+        click.echo("\nTo force a fresh build, pass --rebuild")
+        return
 
     # Step 1: Convert each dataset to a processed .h5ad
     h5ad_paths = []
@@ -543,7 +563,6 @@ def build(config_paths, condition_map_path, output, skip_convert):
     click.echo("\n=== Merging Datasets ===")
     combined = celldata.merge_datasets(h5ad_paths, cond_map)
 
-    out_path = os.path.join(output, "combined_processed.h5ad")
     combined.write_h5ad(out_path)
     size_mb = os.path.getsize(out_path) / 1e6
     click.echo(f"\nSaved combined dataset -> {out_path} ({size_mb:.1f} MB)")

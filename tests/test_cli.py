@@ -866,8 +866,9 @@ class TestBuildCommand:
     def test_skip_convert_flag(self, build_shared_tmp, build_inputs, build_result):
         """--skip-convert should skip the convert step when .h5ad files exist.
 
-        We run build a second time with --skip-convert. The output should
-        mention 'Skipping' and still produce a valid combined file.
+        We run build a second time with --skip-convert and --rebuild (to bypass
+        the combined file cache). The output should mention 'Skipping' for the
+        convert step and still produce a valid combined file.
         """
         yaml1, yaml2, cmap_path = build_inputs
         _, out_dir = build_result  # ensure first build has run
@@ -880,9 +881,61 @@ class TestBuildCommand:
             "--condition-map", cmap_path,
             "--output", out_dir,
             "--skip-convert",
+            "--rebuild",
         ])
         assert result.exit_code == 0, result.output
         assert "Skipping" in result.output
+
+    def test_reuses_existing_combined(self, build_inputs, build_result):
+        """Re-running build without --rebuild should reuse the existing combined file.
+
+        The user should not have to wait for a full rebuild every time they run
+        build. If combined_processed.h5ad already exists, the command should
+        print a message and return immediately.
+        """
+        yaml1, yaml2, cmap_path = build_inputs
+        _, out_dir = build_result  # ensure first build has run
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "build",
+            "--config", yaml1,
+            "--config", yaml2,
+            "--condition-map", cmap_path,
+            "--output", out_dir,
+        ])
+        assert result.exit_code == 0, result.output
+        assert "already exists" in result.output
+
+    def test_rebuild_flag_forces_fresh_build(self, build_shared_tmp, build_inputs, build_result):
+        """--rebuild should force a fresh build even if combined file exists.
+
+        When the user changes the condition map or adds a new dataset, they
+        need a way to force a rebuild. --rebuild must re-run the merge and
+        overwrite the existing combined_processed.h5ad.
+        """
+        yaml1, yaml2, cmap_path = build_inputs
+        _, out_dir = build_result  # ensure first build has run
+
+        combined_path = Path(out_dir) / "combined_processed.h5ad"
+        mtime_before = combined_path.stat().st_mtime
+
+        import time
+        time.sleep(0.05)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "build",
+            "--config", yaml1,
+            "--config", yaml2,
+            "--condition-map", cmap_path,
+            "--output", out_dir,
+            "--skip-convert",
+            "--rebuild",
+        ])
+        assert result.exit_code == 0, result.output
+        assert "Saved combined dataset" in result.output
+        assert combined_path.stat().st_mtime > mtime_before
 
     def test_missing_condition_map_fails(self, build_inputs):
         """Omitting --condition-map must cause the command to fail."""
