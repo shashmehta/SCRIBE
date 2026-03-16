@@ -158,7 +158,7 @@ class TestLoadConditionMap:
     def test_larger_map_loads_all_entries(self, shared_tmp):
         """A YAML with many entries must load all of them, not just the first few.
 
-        The real PASCAL condition_map.yaml has 7 entries covering normal,
+        The real SCRIBE condition_map.yaml has 7 entries covering normal,
         primary, metastatic, IPMN, PASC, and others. We verify the loader
         handles a realistic multi-entry map without silently dropping entries.
         """

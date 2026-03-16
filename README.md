@@ -1,13 +1,13 @@
-# PASCAL
-### Pancreatic Annotation and Single-Cell Analysis
+# SCRIBE
+### Single-Cell RNA Interpretable Biomarker Explorer
 
-A Python machine learning pipeline for classifying pancreatic cell types using single-cell RNA sequencing (scRNA-seq) data. PASCAL loads raw data from public databases, cleans it, trains a Random Forest classifier to distinguish **normal**, **precancerous**, and **malignant** pancreatic cells, and identifies the top genes driving each classification.
+A Python machine learning pipeline for identifying biomarkers and therapeutic targets from single-cell RNA sequencing (scRNA-seq) data using explainable machine learning methods. SCRIBE loads raw data from public databases, cleans it, trains interpretable classifiers to distinguish cell conditions, and identifies the top genes driving each classification.
 
 ## Overview
 
-PASCAL uses Random Forest classification on gene expression data to:
+SCRIBE uses Random Forest classification on gene expression data to:
 - **Convert** raw GEO datasets into a standard format
-- **Classify** pancreatic cells into 3 classes: normal, precancerous, and malignant
+- **Classify** cells into biological conditions (e.g. normal, precancerous, malignant)
 - **Identify** top discriminating genes through feature importance analysis
 - **Analyze** differential gene expression between conditions
 - **Visualize** results with UMAP plots and feature importance charts
@@ -17,7 +17,7 @@ The pipeline is designed for researchers working with single-cell RNA-seq data i
 
 ## Datasets
 
-PASCAL is built on three published pancreatic scRNA-seq studies from GEO:
+SCRIBE has been validated on three published pancreatic scRNA-seq studies from GEO:
 
 | Dataset | Description | Conditions |
 |---------|-------------|------------|
@@ -38,14 +38,14 @@ These are unified into a 3-class scheme: **normal / precancerous / malignant**.
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/PASCAL.git
-   cd PASCAL
+   git clone https://github.com/yourusername/SCRIBE.git
+   cd SCRIBE
    ```
 
 2. **Create and activate conda environment:**
    ```bash
-   conda create -n pascal python=3.12
-   conda activate pascal
+   conda create -n scribe python=3.12
+   conda activate scribe
    ```
 
 3. **Install dependencies:**
@@ -55,7 +55,7 @@ These are unified into a 3-class scheme: **normal / precancerous / malignant**.
 
 ## Usage
 
-PASCAL is run through `run.py` using sub-commands (similar to how `git commit` and `git push` are sub-commands of `git`).
+SCRIBE is run through `run.py` using sub-commands (similar to how `git commit` and `git push` are sub-commands of `git`).
 
 ### Step 1 — Inspect raw data (optional but recommended)
 
@@ -149,7 +149,7 @@ output/
 ## Project Structure
 
 ```
-PASCAL/
+SCRIBE/
 ├── cellclassifier/           # Main Python package
 │   ├── __init__.py
 │   ├── cli.py               # CLI sub-commands (convert, inspect, merge, run, ...)

@@ -1,4 +1,4 @@
-"""YAML config dataclasses and loaders for CellClassifier.
+"""YAML config dataclasses and loaders for SCRIBE.
 
 Each YAML file is loaded into one of these dataclass objects, which the
 rest of the code uses instead of reading the YAML directly. This keeps
