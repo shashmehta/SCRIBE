@@ -1,4 +1,4 @@
-"""Click CLI entry point for CellClassifier.
+"""Click CLI entry point for SCRIBE.
 
 Click is a Python library that lets you build command-line tools using decorators
 (the @cli.command() and @click.option() lines). Instead of one big script, we have
@@ -24,7 +24,7 @@ from cellclassifier import batch as cellbatch
 # Running `python run.py --help` shows the available sub-commands.
 @click.group()
 def cli():
-    """CellClassifier: classify pancreatic cell conditions from scRNA-seq data."""
+    """SCRIBE: Single-Cell RNA Interpretable Biomarker Explorer."""
 
 
 # ── convert ───────────────────────────────────────────────────────────────────

@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CellClassifier is a Python ML/bioinformatics project for classifying pancreatic cell types using single-cell RNA sequencing (scRNA-seq) gene expression data. The primary goal is distinguishing normal vs tumor cells in Pancreatic Ductal Adenocarcinoma (PDAC) and classifying pancreatic cell subtypes (alpha, beta, delta). Additionally, it will determine and rank the top genes used to classify between the health and malignant cells, and determine biomarkers and potential target genes for future therapies.
+SCRIBE (Single-Cell RNA Interpretable Biomarker Explorer) is a Python ML/bioinformatics project for identifying biomarkers and therapeutic targets from single-cell RNA sequencing (scRNA-seq) data using explainable machine learning methods. It classifies cell conditions, ranks discriminating genes, and identifies potential targets for future therapies.
 
 ## Environment Setup
 
-- **Python 3.12** managed via Conda (`cellclassifier` environment)
+- **Python 3.12** managed via Conda (`scribe` environment)
 - Dependencies listed in `requirements.txt`. Install with: `pip install -r requirements.txt`
 - Key dependencies: `scanpy`, `anndata`, `pandas`, `numpy`, `scikit-learn`, `matplotlib`, `seaborn`, `scipy`, `h5py`, `joblib`, `gdown`
 

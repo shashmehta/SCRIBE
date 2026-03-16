@@ -1,1 +1,1 @@
-"""CellClassifier: PDAC cell condition classification from scRNA-seq data."""
+"""SCRIBE: Single-Cell RNA Interpretable Biomarker Explorer."""
