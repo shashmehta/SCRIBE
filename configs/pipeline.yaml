@@ -42,5 +42,6 @@ batch:
     - "RPL13A"
     - "RPLP0"
     - "PPIA"
-  correction_method: "combat"    # combat (default, zero deps), harmony, scanorama, or all
+  correction_method: "harmony"   # harmony (default), combat, scanorama, or all
+  n_top_genes: 3000              # batch-aware HVGs selected jointly after merge
   n_neighbors_mixing: 50         # k for batch mixing score

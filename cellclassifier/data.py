@@ -159,12 +159,15 @@ def merge_datasets(
     condition_map: dict[str, str],
     condition_col: str = "condition",
     batch_key: str = "dataset",
+    n_top_genes: int = 3000,
+    harmony_correct: bool = True,
 ) -> anndata.AnnData:
     """Combine multiple processed h5ad files for joint training.
 
     Loads each dataset, remaps condition labels to a unified scheme,
-    intersects gene sets, concatenates, and re-runs preprocessing so
-    embeddings are comparable across datasets.
+    intersects gene sets, concatenates, runs batch-aware HVG selection
+    on the combined data, and computes embeddings with optional Harmony
+    batch correction.
 
     Args:
         h5ad_paths: Paths to processed .h5ad files.
@@ -172,6 +175,10 @@ def merge_datasets(
             (e.g. {"primary": "malignant", "IPMN": "precancerous"}).
         condition_col: Name of the obs column holding condition labels.
         batch_key: Name of the obs column tracking dataset origin.
+        n_top_genes: Number of highly variable genes to select on the
+            combined data using batch-aware HVG selection.
+        harmony_correct: If True, apply Harmony batch correction on PCA
+            embeddings before computing UMAP and Leiden clusters.
 
     Returns:
         Combined AnnData with unified condition labels and fresh embeddings.
@@ -225,16 +232,73 @@ def merge_datasets(
     print(f"Datasets: {combined.obs[batch_key].value_counts().to_dict()}")
     print(f"Conditions: {combined.obs[condition_col].value_counts().to_dict()}")
 
-    # The individual datasets are already normalized+log-transformed+scaled.
-    # We cannot re-run filter/normalize/HVG steps on scaled data — filter_cells
-    # would see all values as near-zero (the mean is 0 after scaling) and drop
-    # every cell. Instead, we just compute fresh joint embeddings (PCA → UMAP →
-    # Leiden) so cells from all three datasets are in the same coordinate space.
-    print("\nComputing joint embeddings (PCA → neighbors → UMAP → Leiden)...")
     combined.var_names_make_unique()
     combined.obs_names_make_unique()
+
+    # Ensure sparse format is preserved (concat may densify if inputs were dense).
+    # Keeping sparse is critical — the full gene set (~15,000+) would crash PCA/scale
+    # if densified. We subset to HVGs first, then densify only the small gene set.
+    if not scipy.sparse.issparse(combined.X):
+        combined.X = scipy.sparse.csr_matrix(combined.X)
+
+    # ── Batch-aware HVG selection ──────────────────────────────────────────────
+    # Instead of selecting HVGs per-dataset then intersecting (which collapsed to
+    # ~265 genes and lost housekeeping genes), we select HVGs jointly on the
+    # combined data using batch_key. This computes variability WITHIN each batch,
+    # then ranks genes by their consistency across batches — avoiding genes that
+    # appear variable only due to batch effects.
+    print(f"\nSelecting {n_top_genes} batch-aware highly variable genes...")
+    sc.pp.highly_variable_genes(
+        combined, batch_key=batch_key, n_top_genes=n_top_genes, subset=False,
+    )
+
+    # Force-include housekeeping genes — needed for batch effect quantification.
+    from cellclassifier.batch import DEFAULT_HOUSEKEEPING_GENES
+    hk_in_data = [g for g in DEFAULT_HOUSEKEEPING_GENES if g in combined.var_names]
+    for gene in hk_in_data:
+        combined.var.loc[gene, "highly_variable"] = True
+    n_selected = int(combined.var["highly_variable"].sum())
+    print(
+        f"  {n_selected} genes selected "
+        f"({len(hk_in_data)} housekeeping genes force-included: {hk_in_data})"
+    )
+
+    # Subset to selected genes — now small enough for PCA/scale (~3,000 genes)
+    combined = combined[:, combined.var["highly_variable"]].copy()
+
+    # Save unscaled data in .raw for batch diagnostics (housekeeping gene analysis)
+    combined.raw = combined.copy()
+
+    # Scale and compute embeddings
+    print("\nScaling combined data and computing joint embeddings...")
+    sc.pp.scale(combined, max_value=10)
     sc.tl.pca(combined)
-    sc.pp.neighbors(combined, n_pcs=30)
+
+    # ── Optional Harmony batch correction ──────────────────────────────────────
+    if harmony_correct:
+        print("  Applying Harmony batch correction on PCA embeddings...")
+        try:
+            import harmonypy
+        except ImportError:
+            raise ImportError(
+                "harmonypy is required for Harmony batch correction. "
+                "Install it with: pip install harmonypy"
+            )
+        harmony_out = harmonypy.run_harmony(
+            combined.obsm["X_pca"][:, :30],
+            combined.obs,
+            batch_key,
+        )
+        Z = np.array(harmony_out.Z_corr)
+        # harmonypy may return (n_pcs, n_cells) — transpose if needed
+        if Z.shape[0] == 30 and Z.shape[1] == combined.n_obs:
+            Z = Z.T
+        combined.obsm["X_pca_harmony"] = Z
+        sc.pp.neighbors(combined, use_rep="X_pca_harmony")
+        print("  Harmony correction applied — using corrected PCA for UMAP/Leiden")
+    else:
+        sc.pp.neighbors(combined, n_pcs=30)
+
     sc.tl.umap(combined)
     sc.tl.leiden(combined, resolution=0.5)
     print(

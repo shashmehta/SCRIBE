@@ -1,4 +1,5 @@
 id: GSE154778
+url: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE154778
 title: "Primary vs Metastatic PDAC"
 description: >
   10 primary tumors and 6 metastatic PDAC samples profiled by scRNA-seq.

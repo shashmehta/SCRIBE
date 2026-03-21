@@ -241,6 +241,58 @@ def plot_batch_distance_heatmap(
         plt.show()
 
 
+def plot_condition_subset_umap(
+    adata: anndata.AnnData,
+    condition: str,
+    condition_col: str = "condition",
+    batch_key: str = "dataset",
+    point_size: int = 10,
+    save_path: str | None = None,
+) -> None:
+    """UMAP of cells from a single condition, colored by dataset.
+
+    Subsets the AnnData to cells matching the given condition, recomputes
+    PCA/neighbors/UMAP on the subset, and plots colored by dataset.
+    If cells from different datasets cluster separately despite being
+    the same cell state, this indicates batch effects.
+
+    Args:
+        adata: AnnData with expression data and obs annotations.
+        condition: The condition value to subset to (e.g. 'malignant').
+        condition_col: Obs column holding condition labels.
+        batch_key: Obs column identifying the dataset/batch.
+        point_size: Size of scatter points.
+        save_path: If provided, save the figure. Otherwise display.
+    """
+    # Subset to the requested condition
+    mask = adata.obs[condition_col] == condition
+    subset = adata[mask].copy()
+
+    n_datasets = subset.obs[batch_key].nunique()
+    dataset_counts = subset.obs[batch_key].value_counts().to_dict()
+    print(f"  {condition}: {subset.n_obs} cells across {n_datasets} datasets {dataset_counts}")
+
+    # Recompute embeddings on the subset for a clean UMAP
+    sc.tl.pca(subset)
+    sc.pp.neighbors(subset, n_pcs=30)
+    sc.tl.umap(subset)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sc.pl.umap(
+        subset, color=batch_key, ax=ax, show=False, s=point_size,
+        title=f"UMAP — {condition} cells colored by {batch_key}",
+    )
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved -> {save_path}")
+    else:
+        plt.show()
+
+
 def plot_batch_correction_comparison(
     umaps_dict: dict[str, anndata.AnnData],
     batch_key: str = "dataset",

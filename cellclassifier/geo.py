@@ -343,7 +343,7 @@ def assign_sample_metadata(
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
 
-def preprocess_adata(adata: ad.AnnData, config: PreprocessingConfig) -> ad.AnnData:
+def preprocess_adata(adata: ad.AnnData, config: PreprocessingConfig, skip_scale: bool = False, skip_hvg: bool = False, skip_embeddings: bool = False) -> ad.AnnData:
     """Run standard scanpy QC and preprocessing pipeline.
 
     Raw scRNA-seq counts need several cleaning and transformation steps before
@@ -407,34 +407,61 @@ def preprocess_adata(adata: ad.AnnData, config: PreprocessingConfig) -> ad.AnnDa
 
     # Step 6 — select the most variable genes (those that differ most across cells).
     # These carry the most biological information for distinguishing cell types.
-    sc.pp.highly_variable_genes(adata, n_top_genes=config.n_top_genes)
-    print(f"  Highly variable genes: {adata.var['highly_variable'].sum()}")
-    adata = adata[:, adata.var.highly_variable].copy()  # keep only HVGs
+    # When skip_hvg=True (used for multi-dataset merging), we keep ALL genes so
+    # the intersection across datasets retains maximum information for batch
+    # correction and downstream analysis.
+    if not skip_hvg:
+        sc.pp.highly_variable_genes(adata, n_top_genes=config.n_top_genes)
+
+        # Force-include housekeeping genes even though they have low variance.
+        # These are needed for batch effect detection and correction downstream.
+        from cellclassifier.batch import DEFAULT_HOUSEKEEPING_GENES
+        hk_in_data = [g for g in DEFAULT_HOUSEKEEPING_GENES if g in adata.var_names]
+        for gene in hk_in_data:
+            adata.var.loc[gene, "highly_variable"] = True
+        n_hk_added = len(hk_in_data)
+
+        print(f"  Highly variable genes: {adata.var['highly_variable'].sum()} "
+              f"({n_hk_added} housekeeping genes force-included)")
+        adata = adata[:, adata.var.highly_variable].copy()  # keep HVGs + housekeeping
+    else:
+        print(f"  Skipping HVG selection — keeping all {adata.n_vars} genes")
 
     # Step 7 — scale genes so they all have mean 0 and similar variance.
     # max_value=10 clips extreme outliers.
-    sc.pp.scale(adata, max_value=10)
+    # When skip_scale=True (used for multi-dataset merging), we defer scaling
+    # to after concatenation so cross-dataset expression differences are preserved
+    # for batch effect detection and correction.
+    if not skip_scale:
+        sc.pp.scale(adata, max_value=10)
 
-    # PCA (Principal Component Analysis): compress thousands of gene dimensions
-    # into 30 principal components that capture most of the variation.
-    sc.tl.pca(adata)
+    # When skip_embeddings=True (used for multi-dataset build pipeline), we skip
+    # PCA/UMAP/Leiden since merge_datasets() recomputes them on the combined data.
+    # This saves time and avoids running PCA on the full unfiltered gene set.
+    if not skip_embeddings:
+        # PCA (Principal Component Analysis): compress thousands of gene dimensions
+        # into 30 principal components that capture most of the variation.
+        sc.tl.pca(adata)
 
-    # Build a "neighborhood graph": connect each cell to its most similar neighbours
-    # in PCA space. Downstream clustering and UMAP use this graph.
-    sc.pp.neighbors(adata, n_pcs=config.n_pcs)
+        # Build a "neighborhood graph": connect each cell to its most similar neighbours
+        # in PCA space. Downstream clustering and UMAP use this graph.
+        sc.pp.neighbors(adata, n_pcs=config.n_pcs)
 
-    # UMAP: project the high-dimensional data into 2D for visualisation.
-    # Cells that are similar biologically end up close together on the plot.
-    sc.tl.umap(adata)
+        # UMAP: project the high-dimensional data into 2D for visualisation.
+        # Cells that are similar biologically end up close together on the plot.
+        sc.tl.umap(adata)
 
-    # Leiden clustering: group cells into clusters based on the neighborhood graph.
-    # Higher resolution = more, smaller clusters.
-    sc.tl.leiden(adata, resolution=config.leiden_resolution)
+        # Leiden clustering: group cells into clusters based on the neighborhood graph.
+        # Higher resolution = more, smaller clusters.
+        sc.tl.leiden(adata, resolution=config.leiden_resolution)
 
-    print(
-        f"  Output: {adata.n_obs} cells × {adata.n_vars} genes, "
-        f"{adata.obs['leiden'].nunique()} Leiden clusters"
-    )
+    if not skip_embeddings:
+        print(
+            f"  Output: {adata.n_obs} cells × {adata.n_vars} genes, "
+            f"{adata.obs['leiden'].nunique()} Leiden clusters"
+        )
+    else:
+        print(f"  Output: {adata.n_obs} cells × {adata.n_vars} genes (embeddings skipped)")
     return adata
 
 
@@ -555,7 +582,7 @@ def validate_cellxgene(adata: ad.AnnData, name: str = "dataset") -> bool:
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
-def convert_dataset(config: DatasetConfig, output_dir: str) -> str:
+def convert_dataset(config: DatasetConfig, output_dir: str, skip_scale: bool = False, skip_hvg: bool = False, skip_embeddings: bool = False) -> str:
     """Load, preprocess, annotate, validate, and save a GEO dataset as .h5ad.
 
     This is the main function called by `python run.py convert`. It runs all
@@ -603,15 +630,19 @@ def convert_dataset(config: DatasetConfig, output_dir: str) -> str:
     )
 
     # Step 3 — run QC, normalisation, HVG selection, PCA, UMAP, and clustering
-    adata = preprocess_adata(adata, config.preprocessing)
+    adata = preprocess_adata(adata, config.preprocessing, skip_scale=skip_scale, skip_hvg=skip_hvg, skip_embeddings=skip_embeddings)
 
     # Step 4 — add the metadata columns required by the cellxGene schema
     adata = annotate_cellxgene_metadata(adata, config.cellxgene, title=config.title)
 
-    # Step 5 — confirm all required fields are present before saving
-    ok = validate_cellxgene(adata, name=config.id)
-    if not ok:
-        raise ValueError(f"cellxGene validation failed for {config.id}")
+    # Step 5 — confirm all required fields are present before saving.
+    # Skip validation when embeddings are absent (build pipeline defers them to merge).
+    if not skip_embeddings:
+        ok = validate_cellxgene(adata, name=config.id)
+        if not ok:
+            raise ValueError(f"cellxGene validation failed for {config.id}")
+    else:
+        print(f"  Skipping cellxGene validation (embeddings deferred to merge step)")
 
     # Step 6 — write the processed AnnData to disk as an .h5ad file
     out_path = os.path.join(output_dir, f"{config.id}_processed.h5ad")

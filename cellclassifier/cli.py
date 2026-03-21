@@ -450,13 +450,21 @@ def run_pipeline(config, retrain, data_path, output):
     default="./output/combined",
     help="Output directory for the combined .h5ad file.",
 )
-def merge(data_paths, condition_map_path, output):
+@click.option(
+    "--n-top-genes", default=3000, type=int,
+    help="Number of HVGs for joint batch-aware selection (default: 3000).",
+)
+@click.option(
+    "--no-harmony", is_flag=True, default=False,
+    help="Skip Harmony batch correction during merge.",
+)
+def merge(data_paths, condition_map_path, output, n_top_genes, no_harmony):
     """Merge multiple processed datasets into one combined .h5ad file.
 
     Loads each dataset, remaps condition labels using the condition map,
-    intersects gene sets, concatenates, and re-runs preprocessing for
-    fresh embeddings. The combined file can then be used with `run` for
-    joint training.
+    finds common genes, concatenates, selects batch-aware highly variable
+    genes, and computes embeddings with optional Harmony batch correction.
+    The combined file can then be used with `run` for joint training.
 
     Example:
 
@@ -473,7 +481,11 @@ def merge(data_paths, condition_map_path, output):
     cond_map = celldata.load_condition_map(condition_map_path)
 
     click.echo("\n=== Merging Datasets ===")
-    combined = celldata.merge_datasets(list(data_paths), cond_map)
+    combined = celldata.merge_datasets(
+        list(data_paths), cond_map,
+        n_top_genes=n_top_genes,
+        harmony_correct=not no_harmony,
+    )
 
     out_path = os.path.join(output, "combined_processed.h5ad")
     combined.write_h5ad(out_path)
@@ -508,7 +520,16 @@ def merge(data_paths, condition_map_path, output):
     "--rebuild", is_flag=True, default=False,
     help="Force rebuild even if combined_processed.h5ad already exists.",
 )
-def build(config_paths, condition_map_path, output, skip_convert, rebuild):
+@click.option(
+    "--n-top-genes", default=3000, type=int,
+    help="Number of HVGs for joint batch-aware selection (default: 3000).",
+)
+@click.option(
+    "--no-harmony", is_flag=True, default=False,
+    help="Skip Harmony batch correction during build.",
+)
+def build(config_paths, condition_map_path, output, skip_convert, rebuild,
+          n_top_genes, no_harmony):
     """Convert all datasets and merge into a single unified AnnData.
 
     Chains the convert and merge steps into one command: for each --config,
@@ -553,16 +574,20 @@ def build(config_paths, condition_map_path, output, skip_convert, rebuild):
             click.echo(f"\nSkipping convert for {cfg.id} — {h5ad_out} already exists")
         else:
             click.echo(f"\n=== Converting {cfg.id} ===")
-            geo.convert_dataset(cfg, output)
+            geo.convert_dataset(cfg, output, skip_scale=True, skip_hvg=True, skip_embeddings=True)
 
         h5ad_paths.append(h5ad_out)
 
-    # Step 2: Load condition map and merge
+    # Step 2: Load condition map and merge (scaling happens here, after concat)
     click.echo("\n=== Loading Condition Map ===")
     cond_map = celldata.load_condition_map(condition_map_path)
 
     click.echo("\n=== Merging Datasets ===")
-    combined = celldata.merge_datasets(h5ad_paths, cond_map)
+    combined = celldata.merge_datasets(
+        h5ad_paths, cond_map,
+        n_top_genes=n_top_genes,
+        harmony_correct=not no_harmony,
+    )
 
     combined.write_h5ad(out_path)
     size_mb = os.path.getsize(out_path) / 1e6
@@ -615,8 +640,15 @@ def batch_check(data_path, output, batch_key, condition_col):
     click.echo(f"  Batches ({batch_key}): {adata.obs[batch_key].value_counts().to_dict()}")
 
     click.echo("\n=== Housekeeping Gene Expression ===")
+    # Use unscaled data from .raw if available (scaling zero-centers genes,
+    # which erases cross-dataset expression differences needed here)
+    hk_adata = adata
+    if adata.raw is not None:
+        hk_adata = adata.raw.to_adata()
+        hk_adata.obs = adata.obs  # raw doesn't carry obs
+        click.echo("  Using unscaled expression from .raw for housekeeping analysis")
     try:
-        hk_expr = cellbatch.compute_housekeeping_expression(adata, batch_key)
+        hk_expr = cellbatch.compute_housekeeping_expression(hk_adata, batch_key)
         click.echo(hk_expr.to_string())
 
         # Save housekeeping heatmap
@@ -625,7 +657,7 @@ def batch_check(data_path, output, batch_key, condition_col):
         click.echo(f"  Saved -> {hk_path}")
 
         click.echo("\n=== Pairwise Batch Distances ===")
-        distances = cellbatch.compute_batch_distances(adata, batch_key)
+        distances = cellbatch.compute_batch_distances(hk_adata, batch_key)
         click.echo(distances.to_string())
 
         # Save distance heatmap
@@ -650,6 +682,89 @@ def batch_check(data_path, output, batch_key, condition_col):
     plotting.plot_batch_umap(adata, batch_key, condition_col, save_dir=output)
 
     click.echo(f"\nBatch diagnostics saved to {output}/")
+
+
+@cli.command("batch-subset")
+@click.option(
+    "--data", "data_path", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to a combined/processed .h5ad file.",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default="./output/batch",
+    help="Output directory for plots and distance reports.",
+)
+@click.option(
+    "--batch-key",
+    default="dataset",
+    help="Obs column identifying the batch (default: 'dataset').",
+)
+@click.option(
+    "--condition-col",
+    default="condition",
+    help="Obs column holding condition labels (default: 'condition').",
+)
+@click.option(
+    "--conditions",
+    default="malignant,normal",
+    help="Comma-separated conditions to analyse (default: 'malignant,normal').",
+)
+def batch_subset(data_path, output, batch_key, condition_col, conditions):
+    """Per-condition batch effect analysis: subset UMAPs and distribution distances.
+
+    For each condition (e.g. malignant, normal), generates a UMAP of only
+    those cells colored by dataset, and computes pairwise distribution
+    distances (Wasserstein, energy distance, MMD) between datasets.
+
+    Example:
+
+        python run.py batch-subset --data ./output/combined/combined_processed.h5ad \\
+            --output ./output/batch
+    """
+    import scanpy as sc
+
+    os.makedirs(output, exist_ok=True)
+    cond_list = [c.strip() for c in conditions.split(",")]
+
+    click.echo("\n=== Loading Data ===")
+    adata = sc.read_h5ad(data_path)
+    click.echo(f"  {adata.n_obs} cells × {adata.n_vars} genes")
+    click.echo(f"  Conditions: {adata.obs[condition_col].value_counts().to_dict()}")
+
+    # ── Subset UMAPs ────────────────────────────────────────────────────────
+    click.echo("\n=== Generating Per-Condition UMAPs ===")
+    for cond in cond_list:
+        n_cells = (adata.obs[condition_col] == cond).sum()
+        if n_cells == 0:
+            click.echo(f"  Skipping '{cond}' — no cells found")
+            continue
+        save_path = os.path.join(output, f"umap_{cond}_by_{batch_key}.png")
+        plotting.plot_condition_subset_umap(
+            adata, condition=cond, condition_col=condition_col,
+            batch_key=batch_key, save_path=save_path,
+        )
+
+    # ── Distribution distances ──────────────────────────────────────────────
+    click.echo("\n=== Pairwise Distribution Distances (PCA space) ===")
+    dist_results = cellbatch.compute_condition_distribution_distances(
+        adata, condition_col=condition_col, batch_key=batch_key,
+        conditions=cond_list,
+    )
+
+    for cond, df in dist_results.items():
+        click.echo(f"\n  [{cond}]")
+        click.echo(df.to_string(index=False))
+
+        csv_path = os.path.join(output, f"distances_{cond}.csv")
+        df.to_csv(csv_path, index=False)
+        click.echo(f"  Saved -> {csv_path}")
+
+    if not dist_results:
+        click.echo("  No conditions with cells in ≥2 datasets — cannot compute distances.")
+
+    click.echo(f"\nBatch subset analysis saved to {output}/")
 
 
 @cli.command("batch-correct")
