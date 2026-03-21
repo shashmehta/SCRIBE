@@ -167,14 +167,19 @@ def plot_batch_umap(
         condition_col: Obs column for biological condition.
         save_dir: Directory to save the figure. If None, display interactively.
     """
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    # Shuffle cell order so no single batch/condition is drawn on top
+    rng = np.random.RandomState(42)
+    idx = rng.permutation(adata.n_obs)
+    adata_shuffled = adata[idx].copy()
+
+    fig, axes = plt.subplots(1, 2, figsize=(20, 8))
 
     # Left panel: colored by batch
-    sc.pl.umap(adata, color=batch_key, ax=axes[0], show=False, title=f"Colored by {batch_key}")
+    sc.pl.umap(adata_shuffled, color=batch_key, ax=axes[0], show=False, title=f"Colored by {batch_key}")
 
     # Right panel: colored by condition
-    if condition_col in adata.obs.columns:
-        sc.pl.umap(adata, color=condition_col, ax=axes[1], show=False, title=f"Colored by {condition_col}")
+    if condition_col in adata_shuffled.obs.columns:
+        sc.pl.umap(adata_shuffled, color=condition_col, ax=axes[1], show=False, title=f"Colored by {condition_col}")
     else:
         axes[1].set_title(f"{condition_col} not found")
 
