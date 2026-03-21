@@ -266,6 +266,137 @@ def compute_batch_mixing_score(
     return float(np.mean(mixing_scores))
 
 
+def compute_condition_distribution_distances(
+    adata: anndata.AnnData,
+    condition_col: str = "condition",
+    batch_key: str = "dataset",
+    conditions: list[str] | None = None,
+    n_pcs: int = 30,
+) -> dict[str, pd.DataFrame]:
+    """Pairwise distribution distances between datasets for each condition.
+
+    For each condition (e.g. malignant, normal), subsets cells to that
+    condition and computes pairwise distances between datasets using
+    Wasserstein, energy distance, and maximum mean discrepancy (MMD).
+    Large distances for the same cell state across datasets suggest
+    batch effects rather than biological variation.
+
+    Args:
+        adata: AnnData with PCA computed.
+        condition_col: Obs column holding condition labels.
+        batch_key: Obs column identifying the dataset/batch.
+        conditions: Which conditions to evaluate. Defaults to all conditions
+            present in at least two datasets.
+        n_pcs: Number of PCs to use for distance computation.
+
+    Returns:
+        Dict mapping condition name to a DataFrame with columns
+        [dataset_1, dataset_2, wasserstein, energy, mmd].
+    """
+    from scipy.stats import wasserstein_distance
+    from itertools import combinations
+
+    # Ensure PCA exists
+    if "X_pca" not in adata.obsm:
+        sc.tl.pca(adata, n_comps=n_pcs)
+
+    pca = adata.obsm["X_pca"][:, :n_pcs]
+    obs = adata.obs
+
+    # Determine which conditions appear in at least 2 datasets
+    if conditions is None:
+        cond_datasets = obs.groupby(condition_col)[batch_key].nunique()
+        conditions = cond_datasets[cond_datasets >= 2].index.tolist()
+
+    results = {}
+    for cond in conditions:
+        cond_mask = (obs[condition_col] == cond).values
+        datasets_in_cond = obs.loc[cond_mask, batch_key].unique()
+        if len(datasets_in_cond) < 2:
+            continue
+
+        rows = []
+        for ds_a, ds_b in combinations(sorted(datasets_in_cond), 2):
+            mask_a = (cond_mask & (obs[batch_key] == ds_a).values)
+            mask_b = (cond_mask & (obs[batch_key] == ds_b).values)
+            pca_a = pca[mask_a]
+            pca_b = pca[mask_b]
+
+            # Wasserstein distance: average 1D Wasserstein across PCs
+            w_dists = [
+                wasserstein_distance(pca_a[:, pc], pca_b[:, pc])
+                for pc in range(n_pcs)
+            ]
+            w_avg = float(np.mean(w_dists))
+
+            # Energy distance
+            e_dist = _energy_distance(pca_a, pca_b)
+
+            # Maximum Mean Discrepancy (MMD) with RBF kernel
+            mmd = _mmd_rbf(pca_a, pca_b)
+
+            rows.append({
+                "dataset_1": ds_a,
+                "dataset_2": ds_b,
+                "n_cells_1": int(mask_a.sum()),
+                "n_cells_2": int(mask_b.sum()),
+                "wasserstein_avg": round(w_avg, 4),
+                "energy_distance": round(e_dist, 4),
+                "mmd_rbf": round(mmd, 4),
+            })
+
+        results[cond] = pd.DataFrame(rows)
+
+    return results
+
+
+def _energy_distance(X: np.ndarray, Y: np.ndarray, max_samples: int = 5000) -> float:
+    """Energy distance between two multivariate samples.
+
+    Energy distance = 2*E[||X-Y||] - E[||X-X'||] - E[||Y-Y'||]
+    Subsample if datasets are large to keep computation tractable.
+    """
+    from scipy.spatial.distance import cdist
+
+    rng = np.random.RandomState(42)
+    if len(X) > max_samples:
+        X = X[rng.choice(len(X), max_samples, replace=False)]
+    if len(Y) > max_samples:
+        Y = Y[rng.choice(len(Y), max_samples, replace=False)]
+
+    xy = cdist(X, Y).mean()
+    xx = cdist(X, X).mean()
+    yy = cdist(Y, Y).mean()
+    return float(2 * xy - xx - yy)
+
+
+def _mmd_rbf(X: np.ndarray, Y: np.ndarray, max_samples: int = 5000) -> float:
+    """Maximum Mean Discrepancy with RBF kernel (median heuristic for bandwidth).
+
+    MMD^2 = E[k(X,X')] + E[k(Y,Y')] - 2*E[k(X,Y)]
+    """
+    from scipy.spatial.distance import cdist
+
+    rng = np.random.RandomState(42)
+    if len(X) > max_samples:
+        X = X[rng.choice(len(X), max_samples, replace=False)]
+    if len(Y) > max_samples:
+        Y = Y[rng.choice(len(Y), max_samples, replace=False)]
+
+    XY = np.vstack([X, Y])
+    dists_all = cdist(XY, XY)
+    # Median heuristic for RBF bandwidth
+    median_dist = np.median(dists_all[dists_all > 0])
+    gamma = 1.0 / (2 * median_dist ** 2) if median_dist > 0 else 1.0
+
+    K_xx = np.exp(-gamma * cdist(X, X) ** 2).mean()
+    K_yy = np.exp(-gamma * cdist(Y, Y) ** 2).mean()
+    K_xy = np.exp(-gamma * cdist(X, Y) ** 2).mean()
+
+    mmd_sq = K_xx + K_yy - 2 * K_xy
+    return float(np.sqrt(max(mmd_sq, 0)))
+
+
 def compare_corrections(
     uncorrected: anndata.AnnData,
     corrections: dict[str, anndata.AnnData],

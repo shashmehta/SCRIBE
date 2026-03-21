@@ -128,7 +128,8 @@ class BatchConfig:
     housekeeping_genes: list[str] = field(  # genes for batch effect quantification
         default_factory=lambda: ["ACTB", "GAPDH", "B2M", "RPL13A", "RPLP0", "PPIA"]
     )
-    correction_method: str = "combat"       # default correction: combat, harmony, scanorama, or all
+    correction_method: str = "harmony"      # default correction: harmony, combat, scanorama, or all
+    n_top_genes: int = 3000                 # number of batch-aware HVGs for joint selection after merge
     n_neighbors_mixing: int = 50            # k for batch mixing score computation
 
 

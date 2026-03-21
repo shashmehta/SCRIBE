@@ -8,7 +8,7 @@ SCRIBE (Single-Cell RNA Interpretable Biomarker Explorer) is a Python ML/bioinfo
 
 ## Environment Setup
 
-- **Python 3.12** managed via Conda (`scribe` environment)
+- **Python 3.10** managed via Conda (`mlproj` environment)
 - Dependencies listed in `requirements.txt`. Install with: `pip install -r requirements.txt`
 - Key dependencies: `scanpy`, `anndata`, `pandas`, `numpy`, `scikit-learn`, `matplotlib`, `seaborn`, `scipy`, `h5py`, `joblib`, `gdown`
 
@@ -66,13 +66,30 @@ run.py               # CLI entry point — delegates to cellclassifier.cli
 - **scanpy pipeline**: `normalize_total` → `log1p` → `highly_variable_genes` → `pca` → `neighbors` is the standard preprocessing chain used throughout.
 - Pancreatic cell types of interest: A cells (alpha/glucagon), B cells (beta/insulin), D cells (delta/somatostatin).
 
-## Current Data Issues (Phase 2 findings — relevant for Phase 3)
+## Current Data Status
 
-The unified dataset at `output/combined/combined_processed.h5ad` has 45,933 cells × 265 genes across 3 GEO datasets. Phase 2 batch analysis uncovered two significant issues that must inform Phase 3 classifier design:
+### Batch-aware HVG pipeline (in progress — 2026-03-20)
 
-### 1. Condition–dataset confounding
+The `build` command now uses **batch-aware HVG selection after merging** instead of per-dataset HVG then intersection. This was implemented to solve the problem where per-dataset HVG selection left only 265 genes and lost all housekeeping genes.
 
-The biological conditions are not evenly distributed across datasets:
+**New pipeline flow (`merge_datasets()` in `data.py`):**
+1. Each dataset is normalized + log1p independently (with `skip_hvg=True`, `skip_scale=True`, `skip_embeddings=True`)
+2. Datasets are concatenated on ALL common genes (~14,899 genes, kept sparse)
+3. `sc.pp.highly_variable_genes(batch_key='dataset', n_top_genes=3000)` selects genes variable within each batch
+4. Housekeeping genes (ACTB, GAPDH, B2M, RPL13A, RPLP0, PPIA) are force-included
+5. Subset to ~3,004 genes, then scale → PCA → optional Harmony → UMAP → Leiden
+
+**Current combined dataset:** 45,933 cells × 3,004 genes (built without Harmony via `--no-harmony`)
+
+**Next steps:**
+- UMAPs of the uncorrected 3,004-gene dataset show batch effects are still present (datasets cluster separately)
+- Need to rebuild WITH Harmony correction (`python run.py build --rebuild` without `--no-harmony`) and compare UMAPs
+- Run `batch-check` and `batch-subset` to quantify improvement
+- Then proceed to Phase 3 classifier training
+
+**CLI options added:** `--n-top-genes` (default 3000) and `--no-harmony` on both `build` and `merge` commands.
+
+### Condition–dataset confounding (unchanged)
 
 | | GSE154778 | GSE162708 | GSE165399 |
 |---|---|---|---|
@@ -84,20 +101,10 @@ The biological conditions are not evenly distributed across datasets:
 - Precancerous cells come **exclusively** from GSE165399
 - Normal cells come only from GSE162708 and GSE165399
 
-This means batch correction cannot fully disentangle technical from biological effects, and **leave-one-dataset-out cross-validation is not feasible** (test folds would have missing classes). Phase 3 should use stratified k-fold CV with per-dataset accuracy breakdowns to detect batch overfitting.
+This means batch correction cannot fully disentangle technical from biological effects. Phase 3 should use stratified k-fold CV with per-dataset accuracy breakdowns.
 
-### 2. Small gene space after HVG intersection
+### Previous batch correction results (on old 265-gene dataset — obsolete)
 
-Each dataset independently selected its top 2,000 highly variable genes during preprocessing, then the merge intersected them — leaving only **265 shared genes**. Standard housekeeping genes (ACTB, GAPDH, etc.) were filtered out by HVG selection, so housekeeping-based batch quantification is not possible on the current combined data. The data was also independently scaled (zero-centered) per dataset before merging, which limits what post-hoc batch correction can achieve.
-
-### 3. Batch correction results
-
-- **ComBat**: Mixing score 0.129 → 0.136 (minimal improvement). Corrected file: `output/corrected/corrected_combat.h5ad`
-- **Harmony**: Mixing score 0.129 → 0.129 (no change), but silhouette improved -0.023 → 0.009. Corrected file: `output/corrected/corrected_harmony.h5ad`
-- Both methods had limited impact due to the confounding described above.
-
-### Implications for Phase 3
-
-- The classifier may learn dataset identity rather than true biological markers. **Per-dataset accuracy breakdowns** are essential.
-- Consider including `dataset` as a covariate or using domain-adversarial approaches.
-- Despite the confounding, cells from GSE162708 (which has both malignant and normal) do separate by condition, suggesting real biological signal exists.
+- ComBat and Harmony had minimal impact on the old 265-gene dataset
+- Old corrected files have been deleted to save disk space
+- New batch correction should be evaluated on the 3,004-gene dataset
