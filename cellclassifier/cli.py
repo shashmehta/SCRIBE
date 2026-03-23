@@ -861,6 +861,184 @@ def batch_correct(data_path, method, output, batch_key):
     click.echo(f"\nBatch correction results saved to {output}/")
 
 
+# ── hk-analysis ───────────────────────────────────────────────────────────────
+
+@cli.command("hk-analysis")
+@click.option(
+    "--data", required=True,
+    type=click.Path(exists=True),
+    help="Path to combined .h5ad OR directory containing per-dataset .h5ad files.",
+)
+@click.option(
+    "--output", default="./output/hk_analysis",
+    type=click.Path(file_okay=False),
+    help="Directory for output plots and CSV results.",
+)
+@click.option(
+    "--batch-key", default="dataset",
+    help="Obs column identifying the source dataset/batch.",
+)
+@click.option(
+    "--condition-col", default="condition",
+    help="Obs column holding condition labels (e.g. normal, malignant).",
+)
+@click.option(
+    "--pval-threshold", default=0.05, type=float,
+    help="Adjusted p-value cutoff for excluding DE genes from HK set.",
+)
+@click.option(
+    "--log2fc-threshold", default=0.5, type=float,
+    help="Absolute log2FC cutoff for excluding DE genes from HK set.",
+)
+def hk_analysis(data, output, batch_key, condition_col, pval_threshold, log2fc_threshold):
+    """Housekeeping gene analysis to disentangle batch effects from biology.
+
+    This command provides a focused diagnostic: if housekeeping genes (which
+    should be uniformly expressed) show systematic differences across datasets,
+    those differences must be technical batch effects, not biological signal.
+
+    The analysis needs access to ALL common genes (not just HVGs), because many
+    housekeeping genes are excluded during HVG selection. If --data points to a
+    directory containing per-dataset .h5ad files, they are concatenated on all
+    common genes. If --data is a single .h5ad file, it is used directly (but
+    may have fewer candidate genes available).
+
+    Pipeline:
+      1. Load datasets (concatenate on all common genes if directory given)
+      2. Select housekeeping genes via data-driven filtering:
+         - Start from ~40 curated candidates
+         - Exclude any that are differentially expressed between normal
+           and malignant cells (using Wilcoxon test on datasets that have both)
+      3. Run PCA on the filtered housekeeping genes only
+      4. Run differential expression (rank_genes_groups) across datasets
+      5. Generate diagnostic plots (PCA scatter + per-gene violin plots)
+
+    Example:
+
+        python run.py hk-analysis --data ./output/combined/ --output ./output/hk_analysis
+
+    \b
+    Scripts to read for understanding this analysis:
+      - cellclassifier/batch.py   — select_housekeeping_genes(), run_housekeeping_pca(), run_housekeeping_de()
+      - cellclassifier/plotting.py — plot_housekeeping_pca(), plot_housekeeping_violin()
+      - cellclassifier/cli.py     — this command (hk-analysis)
+    """
+    import scanpy as sc_lib
+    import anndata as ad
+
+    os.makedirs(output, exist_ok=True)
+
+    # ── Step 1: Load data ──
+    # If --data is a directory, concatenate per-dataset H5AD files on ALL common
+    # genes (not just HVGs) so we have the full ~14,899-gene space for HK analysis.
+    # If it's a single file, load it directly (may have fewer HK candidates).
+    if os.path.isdir(data):
+        click.echo(f"\n=== Loading per-dataset H5AD files from: {data} ===")
+        # Only load per-dataset files (GSE*_processed.h5ad), not combined files
+        h5ad_files = sorted(Path(data).glob("GSE*_processed.h5ad"))
+        if not h5ad_files:
+            raise click.ClickException(f"No GSE*_processed.h5ad files found in {data}")
+
+        adatas = []
+        for f in h5ad_files:
+            a = sc_lib.read_h5ad(str(f))
+            # Ensure the batch_key column exists — per-dataset files may not
+            # have it, so derive it from the filename (e.g. GSE154778)
+            if batch_key not in a.obs.columns:
+                ds_name = f.stem.replace("_processed", "")
+                a.obs[batch_key] = ds_name
+            click.echo(f"  {f.name}: {a.n_obs} cells × {a.n_vars} genes")
+            adatas.append(a)
+
+        # Find genes common to ALL datasets — this gives ~14,899 genes,
+        # far more than the ~3,004 HVG-filtered combined file
+        common_genes = set(adatas[0].var_names)
+        for a in adatas[1:]:
+            common_genes &= set(a.var_names)
+        common_genes = sorted(common_genes)
+        click.echo(f"  Common genes across {len(adatas)} datasets: {len(common_genes)}")
+
+        # Subset each dataset to common genes and concatenate
+        adatas_common = [a[:, common_genes].copy() for a in adatas]
+        adata = ad.concat(adatas_common, join="inner")
+        adata.obs_names_make_unique()
+
+        # Normalize and log-transform if not already done
+        # (per-dataset files are already normalized+log1p from convert step)
+        click.echo(f"  Combined: {adata.n_obs} cells × {adata.n_vars} genes")
+    else:
+        click.echo(f"\n=== Loading combined dataset: {data} ===")
+        adata = sc_lib.read_h5ad(data)
+
+    click.echo(f"  Shape: {adata.n_obs} cells × {adata.n_vars} genes")
+    click.echo(f"  Datasets: {adata.obs[batch_key].value_counts().to_dict()}")
+    click.echo(f"  Conditions: {adata.obs[condition_col].value_counts().to_dict()}")
+
+    # ── Step 2: Data-driven housekeeping gene selection ──
+    click.echo("\n=== Selecting Housekeeping Genes (data-driven filtering) ===")
+    hk_genes = cellbatch.select_housekeeping_genes(
+        adata,
+        condition_col=condition_col,
+        batch_key=batch_key,
+        pval_threshold=pval_threshold,
+        log2fc_threshold=log2fc_threshold,
+    )
+
+    if not hk_genes:
+        click.echo("ERROR: No housekeeping genes survived filtering. "
+                    "Try relaxing --pval-threshold or --log2fc-threshold.")
+        return
+
+    click.echo(f"\n  Selected {len(hk_genes)} housekeeping genes:")
+    click.echo(f"  {hk_genes}")
+
+    # Save the selected gene list for reproducibility
+    genes_path = os.path.join(output, "selected_hk_genes.txt")
+    with open(genes_path, "w") as f:
+        f.write("\n".join(hk_genes))
+    click.echo(f"  Saved gene list -> {genes_path}")
+
+    # ── Step 3: PCA on housekeeping genes ──
+    click.echo("\n=== PCA on Housekeeping Genes ===")
+    adata_hk = cellbatch.run_housekeeping_pca(adata, hk_genes)
+
+    # ── Step 4: Differential expression across datasets ──
+    click.echo("\n=== Differential Expression of HK Genes Across Datasets ===")
+    de_results = cellbatch.run_housekeeping_de(adata, hk_genes, batch_key=batch_key)
+
+    # Save DE results as CSV
+    de_path = os.path.join(output, "hk_de_results.csv")
+    de_results.to_csv(de_path, index=False)
+    click.echo(f"  Saved DE results -> {de_path}")
+
+    # Print a summary table of mean expression per dataset per gene
+    click.echo("\n=== Mean Expression Per Dataset ===")
+    hk_expr = cellbatch.compute_housekeeping_expression(adata, batch_key, hk_genes)
+    click.echo(hk_expr.round(3).to_string())
+
+    # ── Step 5: Generate diagnostic plots ──
+    click.echo("\n=== Generating Plots ===")
+
+    # PCA scatter plots (colored by dataset and condition)
+    plotting.plot_housekeeping_pca(adata_hk, batch_key, condition_col, save_dir=output)
+
+    # Per-gene violin plots showing expression distributions across datasets
+    plotting.plot_housekeeping_violin(adata, hk_genes, batch_key, save_dir=output)
+
+    # Also save the existing housekeeping heatmap for comparison
+    hk_heatmap_path = os.path.join(output, "housekeeping_heatmap.png")
+    plotting.plot_housekeeping_heatmap(hk_expr, save_path=hk_heatmap_path)
+    click.echo(f"  Saved HK heatmap -> {hk_heatmap_path}")
+
+    click.echo(f"\n=== Housekeeping Gene Analysis Complete ===")
+    click.echo(f"Results saved to {output}/")
+    click.echo(f"\nKey files to review:")
+    click.echo(f"  - {genes_path}  (selected genes)")
+    click.echo(f"  - {de_path}  (DE results)")
+    click.echo(f"  - {output}/housekeeping_pca.png  (PCA batch visualization)")
+    click.echo(f"  - {output}/housekeeping_violin*.png  (per-gene distributions)")
+
+
 def main():
     """Entry point called by run.py and the `cellclassifier` console script."""
     cli()
