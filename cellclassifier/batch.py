@@ -19,6 +19,32 @@ import anndata
 # Used as a baseline to detect systematic batch-driven expression shifts.
 DEFAULT_HOUSEKEEPING_GENES = ["ACTB", "GAPDH", "B2M", "RPL13A", "RPLP0", "PPIA"]
 
+# Extended curated list of candidate housekeeping genes for data-driven filtering.
+# These are widely used reference genes in scRNA-seq studies, spanning ribosomal
+# proteins, translation/transcription factors, cytoskeletal, and metabolic genes.
+# The select_housekeeping_genes() function filters this list to keep only genes
+# that are NOT differentially expressed between normal and malignant cells,
+# ensuring we measure purely technical (batch) variation.
+CANDIDATE_HOUSEKEEPING_GENES = [
+    # Cytoskeletal / structural
+    "ACTB", "ACTG1", "TUBA1B", "TUBB",
+    # Glycolytic / metabolic enzymes
+    "GAPDH", "LDHA", "PGK1", "ENO1", "PKM", "ALDOA", "TPI1",
+    # Ribosomal proteins (large subunit)
+    "RPL13A", "RPLP0", "RPL19", "RPL27", "RPL32", "RPL4", "RPL9",
+    "RPL11", "RPL18A", "RPL37A",
+    # Ribosomal proteins (small subunit)
+    "RPS18", "RPS27A", "RPS13", "RPS3", "RPS5", "RPS14", "RPS20",
+    # Translation / chaperone
+    "EEF1A1", "EEF2", "PPIA", "PPIB", "HSP90AB1", "HSPA8",
+    # Antigen presentation / ubiquitin
+    "B2M", "UBC", "UBB",
+    # Transcription / splicing
+    "TBP", "HMBS", "HPRT1", "YWHAZ", "SDHA",
+    # Mitochondrial
+    "ATP5F1B", "NDUFA13", "COX7C", "UQCRB",
+]
+
 
 def compute_housekeeping_expression(
     adata: anndata.AnnData,
@@ -457,3 +483,222 @@ def compare_corrections(
         results[name] = {"mixing_score": mixing, "silhouette": sil}
 
     return pd.DataFrame(results).T
+
+
+# ---------------------------------------------------------------------------
+# Housekeeping gene analysis — data-driven selection, PCA, and DE
+# ---------------------------------------------------------------------------
+
+
+def select_housekeeping_genes(
+    adata: anndata.AnnData,
+    condition_col: str = "condition",
+    batch_key: str = "dataset",
+    candidates: list[str] | None = None,
+    normal_label: str = "normal",
+    malignant_label: str = "malignant",
+    pval_threshold: float = 0.05,
+    log2fc_threshold: float = 0.5,
+) -> list[str]:
+    """Data-driven housekeeping gene selection that excludes condition-biased genes.
+
+    Strategy:
+    1. Start from a curated list of ~40 candidate housekeeping genes.
+    2. Subset to candidates actually present in the combined AnnData.
+    3. Use cells from datasets that contain BOTH normal and malignant cells
+       (to avoid confounding batch with condition).
+    4. Run Wilcoxon rank-sum test (via scanpy) between normal vs malignant.
+    5. Remove any gene with significant differential expression (adjusted
+       p-value < threshold AND |log2FC| > threshold), since those genes
+       vary by biology, not just by batch.
+
+    The surviving genes are "safe" housekeeping genes whose cross-dataset
+    variation can be attributed to technical batch effects.
+
+    Args:
+        adata: Combined AnnData with all datasets merged.
+        condition_col: Obs column holding condition labels (e.g. 'condition').
+        batch_key: Obs column identifying the source dataset.
+        candidates: Starting gene list. Defaults to CANDIDATE_HOUSEKEEPING_GENES.
+        normal_label: Label for normal cells in condition_col.
+        malignant_label: Label for malignant/tumor cells in condition_col.
+        pval_threshold: Adjusted p-value cutoff for DE significance.
+        log2fc_threshold: Absolute log2 fold-change cutoff for DE significance.
+
+    Returns:
+        List of housekeeping gene names that passed the filter.
+    """
+    if candidates is None:
+        candidates = CANDIDATE_HOUSEKEEPING_GENES
+
+    # Step 1: Keep only candidates present in the dataset
+    available = [g for g in candidates if g in adata.var_names]
+    if not available:
+        raise ValueError(
+            f"None of the candidate housekeeping genes found in adata.var_names. "
+            f"First 10 var_names: {adata.var_names[:10].tolist()}"
+        )
+    print(f"  Candidate HK genes in dataset: {len(available)} / {len(candidates)}")
+
+    # Step 2: Find datasets that have BOTH normal and malignant cells.
+    # This avoids confounding: if a dataset has only one condition, any
+    # expression difference could be batch OR biology — we can't tell.
+    datasets_with_both = []
+    for ds in adata.obs[batch_key].unique():
+        ds_mask = adata.obs[batch_key] == ds
+        conditions_in_ds = adata.obs.loc[ds_mask, condition_col].unique()
+        if normal_label in conditions_in_ds and malignant_label in conditions_in_ds:
+            datasets_with_both.append(ds)
+
+    if not datasets_with_both:
+        print("  WARNING: No dataset contains both normal and malignant cells.")
+        print("  Skipping DE filter — returning all available candidates.")
+        return available
+
+    print(f"  Datasets with both '{normal_label}' and '{malignant_label}': {datasets_with_both}")
+
+    # Step 3: Subset to cells from those datasets, and only normal/malignant
+    mask = (
+        adata.obs[batch_key].isin(datasets_with_both)
+        & adata.obs[condition_col].isin([normal_label, malignant_label])
+    )
+    sub = adata[mask, available].copy()
+    print(f"  Cells for DE test: {sub.n_obs} ({sub.obs[condition_col].value_counts().to_dict()})")
+
+    # Step 4: Run Wilcoxon rank-sum test between normal vs malignant
+    sc.tl.rank_genes_groups(
+        sub,
+        groupby=condition_col,
+        groups=[normal_label],
+        reference=malignant_label,
+        method="wilcoxon",
+        use_raw=False,
+    )
+
+    # Extract DE results for the normal-vs-malignant comparison
+    de_results = sc.get.rank_genes_groups_df(sub, group=normal_label)
+
+    # Step 5: Filter out genes that are significantly DE between conditions.
+    # These genes vary by biology (normal vs malignant), so they would
+    # conflate biological variation with batch effects in our analysis.
+    sig_de = de_results[
+        (de_results["pvals_adj"] < pval_threshold)
+        & (de_results["logfoldchanges"].abs() > log2fc_threshold)
+    ]
+    excluded_genes = set(sig_de["names"].tolist())
+    kept = [g for g in available if g not in excluded_genes]
+
+    print(f"  Excluded {len(excluded_genes)} DE genes: {sorted(excluded_genes)}")
+    print(f"  Final housekeeping gene set: {len(kept)} genes")
+
+    return kept
+
+
+def run_housekeeping_pca(
+    adata: anndata.AnnData,
+    hk_genes: list[str],
+    n_comps: int = 10,
+) -> anndata.AnnData:
+    """Run PCA on housekeeping genes only, to visualize batch effects.
+
+    If housekeeping genes are truly stable across conditions, any separation
+    in PCA space must be due to technical batch effects (different library
+    prep, sequencing depth, lab protocols, etc.).
+
+    Args:
+        adata: Combined AnnData with all datasets.
+        hk_genes: Housekeeping gene names to use (output of select_housekeeping_genes).
+        n_comps: Number of principal components to compute.
+
+    Returns:
+        AnnData subset to housekeeping genes with PCA computed in obsm['X_pca'].
+        The original obs metadata (dataset, condition, etc.) is preserved.
+    """
+    import scipy.sparse
+
+    # Subset to housekeeping genes
+    available = [g for g in hk_genes if g in adata.var_names]
+    sub = adata[:, available].copy()
+
+    # Ensure dense matrix for PCA (HK gene count is small, so memory is fine)
+    if scipy.sparse.issparse(sub.X):
+        sub.X = sub.X.toarray()
+
+    # Scale the HK gene expression before PCA so all genes contribute equally.
+    # Without scaling, high-expression genes (e.g. ACTB) would dominate PC1.
+    sc.pp.scale(sub, max_value=10)
+
+    # Compute PCA — the resulting components capture the main axes of variation
+    # among housekeeping genes. If batches separate here, it's technical artifact.
+    n_comps = min(n_comps, len(available) - 1, sub.n_obs - 1)
+    sc.tl.pca(sub, n_comps=n_comps)
+
+    print(f"  PCA on {len(available)} HK genes: {sub.n_obs} cells, {n_comps} components")
+
+    # Report variance explained by top PCs
+    if hasattr(sub.uns.get("pca", {}), "__getitem__") and "variance_ratio" in sub.uns.get("pca", {}):
+        var_ratio = sub.uns["pca"]["variance_ratio"]
+        if len(var_ratio) >= 2:
+            print(f"  PC1 explains {var_ratio[0]*100:.1f}%, PC2 explains {var_ratio[1]*100:.1f}% of variance")
+        elif len(var_ratio) == 1:
+            print(f"  PC1 explains {var_ratio[0]*100:.1f}% of variance (only 1 component)")
+
+    return sub
+
+
+def run_housekeeping_de(
+    adata: anndata.AnnData,
+    hk_genes: list[str],
+    batch_key: str = "dataset",
+) -> pd.DataFrame:
+    """Differential expression of housekeeping genes across datasets.
+
+    Uses scanpy's rank_genes_groups (Wilcoxon) to test whether each
+    housekeeping gene differs significantly between datasets. Ideally,
+    housekeeping genes should NOT be significant — if they are, it
+    indicates batch effects are shifting their expression levels.
+
+    Args:
+        adata: Combined AnnData with all datasets.
+        hk_genes: Housekeeping gene names to test.
+        batch_key: Obs column identifying the source dataset.
+
+    Returns:
+        DataFrame with DE results for all pairwise dataset comparisons,
+        including gene name, log2FC, p-value, adjusted p-value, and
+        which dataset pair was compared.
+    """
+    import scipy.sparse
+
+    # Subset to housekeeping genes
+    available = [g for g in hk_genes if g in adata.var_names]
+    sub = adata[:, available].copy()
+
+    if scipy.sparse.issparse(sub.X):
+        sub.X = sub.X.toarray()
+
+    # Run rank_genes_groups comparing datasets — this tests whether each
+    # HK gene's expression distribution differs across dataset groups.
+    # We use 'rest' as reference so each dataset is compared to all others.
+    sc.tl.rank_genes_groups(
+        sub,
+        groupby=batch_key,
+        method="wilcoxon",
+        use_raw=False,
+    )
+
+    # Collect results for each dataset group
+    all_results = []
+    for group in sub.obs[batch_key].unique():
+        df = sc.get.rank_genes_groups_df(sub, group=group)
+        df["group"] = group
+        all_results.append(df)
+
+    results = pd.concat(all_results, ignore_index=True)
+
+    # Flag genes that are significantly different across batches
+    sig_mask = results["pvals_adj"] < 0.05
+    n_sig = results.loc[sig_mask, "names"].nunique()
+    print(f"  DE across datasets: {n_sig}/{len(available)} HK genes significant (adj p < 0.05)")
+
+    return results

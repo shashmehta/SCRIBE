@@ -36,13 +36,13 @@ The project is a Python package (`cellclassifier/`) with a CLI entry point (`run
 ```
 cellclassifier/
 ├── __init__.py      # Package marker
-├── cli.py           # Click CLI — convert, inspect, merge, build, batch-check, batch-correct, train, evaluate, plot, run
+├── cli.py           # Click CLI — convert, inspect, merge, build, batch-check, batch-correct, hk-analysis, train, evaluate, plot, run
 ├── config.py        # YAML config dataclasses (Dataset, Pipeline, BatchConfig)
 ├── data.py          # Data loading (local + Google Drive), preprocessing, train/test split
 ├── geo.py           # GEO dataset loaders (CSV DGE, 10x MTX, TAR), cellxGene annotation
 ├── model.py         # RF training, evaluation, feature importances, save/load artifacts
 ├── analysis.py      # Differential expression: avg expression, ratios, top genes
-├── batch.py         # Batch effect detection (housekeeping, mixing score) and correction (ComBat, Harmony, Scanorama)
+├── batch.py         # Batch effect detection (housekeeping, mixing score), correction (ComBat, Harmony, Scanorama), HK gene analysis
 └── plotting.py      # UMAP plots, feature importance bar charts, batch diagnostic plots
 run.py               # CLI entry point — delegates to cellclassifier.cli
 ```
@@ -83,11 +83,32 @@ The `build` command now uses **batch-aware HVG selection after merging** instead
 
 **Next steps:**
 - UMAPs of the uncorrected 3,004-gene dataset show batch effects are still present (datasets cluster separately)
+- **NEW: Run `hk-analysis` to quantify batch effects via housekeeping gene PCA and DE** (see below)
 - Need to rebuild WITH Harmony correction (`python run.py build --rebuild` without `--no-harmony`) and compare UMAPs
 - Run `batch-check` and `batch-subset` to quantify improvement
 - Then proceed to Phase 3 classifier training
 
 **CLI options added:** `--n-top-genes` (default 3000) and `--no-harmony` on both `build` and `merge` commands.
+
+### Housekeeping gene batch analysis (added 2026-03-22)
+
+New `hk-analysis` command provides a focused diagnostic for batch effects using housekeeping genes:
+
+```bash
+python run.py hk-analysis --data ./output/combined.h5ad --output ./output/hk_analysis
+```
+
+**Approach:**
+1. Start from ~40 curated candidate housekeeping genes (ribosomal, cytoskeletal, metabolic, etc.)
+2. Filter out genes differentially expressed between normal and malignant cells (Wilcoxon on GSE162708 which has both conditions) — ensures remaining genes reflect purely technical variation
+3. Run PCA on surviving HK genes: if datasets separate in this space, it's batch effects
+4. Run `sc.tl.rank_genes_groups` (Wilcoxon) across datasets to quantify which HK genes differ significantly between batches
+5. Generate PCA scatter plots (colored by dataset/condition) and per-gene violin plots
+
+**Key scripts to read:**
+- `cellclassifier/batch.py` — `CANDIDATE_HOUSEKEEPING_GENES`, `select_housekeeping_genes()`, `run_housekeeping_pca()`, `run_housekeeping_de()`
+- `cellclassifier/plotting.py` — `plot_housekeeping_pca()`, `plot_housekeeping_violin()`
+- `cellclassifier/cli.py` — `hk-analysis` command (end of file)
 
 ### Condition–dataset confounding (unchanged)
 
