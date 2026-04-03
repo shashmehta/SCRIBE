@@ -18,6 +18,8 @@ from cellclassifier import model as cellmodel
 from cellclassifier import analysis as cellanal
 from cellclassifier import plotting
 from cellclassifier import batch as cellbatch
+from cellclassifier import zarr_utils
+from cellclassifier import monitor as cellmonitor
 
 
 # @click.group() creates a parent command that groups sub-commands together.
@@ -802,6 +804,7 @@ def batch_correct(data_path, method, output, batch_key):
             --method combat --output ./output/corrected
     """
     import scanpy as sc
+    from cellclassifier.monitor import ResourceMonitor
 
     os.makedirs(output, exist_ok=True)
 
@@ -812,33 +815,45 @@ def batch_correct(data_path, method, output, batch_key):
     methods = ["combat", "harmony", "scanorama"] if method == "all" else [method]
     corrections = {}
 
-    for m in methods:
-        click.echo(f"\n=== Applying {m.upper()} Correction ===")
-        try:
-            if m == "combat":
-                corrected = cellbatch.correct_batch_combat(adata, batch_key)
-            elif m == "harmony":
-                corrected = cellbatch.correct_batch_harmony(adata, batch_key)
-            elif m == "scanorama":
-                corrected = cellbatch.correct_batch_scanorama(adata, batch_key)
-            else:
-                continue
+    with ResourceMonitor(interval=2.0) as mon:
+        for m in methods:
+            click.echo(f"\n=== Applying {m.upper()} Correction ===")
+            try:
+                if m == "combat":
+                    corrected = cellbatch.correct_batch_combat(adata, batch_key)
+                elif m == "harmony":
+                    corrected = cellbatch.correct_batch_harmony(adata, batch_key)
+                elif m == "scanorama":
+                    corrected = cellbatch.correct_batch_scanorama(adata, batch_key)
+                else:
+                    continue
 
-            # Save corrected h5ad
-            out_path = os.path.join(output, f"corrected_{m}.h5ad")
-            corrected.write_h5ad(out_path)
-            size_mb = os.path.getsize(out_path) / 1e6
-            click.echo(f"  Saved -> {out_path} ({size_mb:.1f} MB)")
+                # Save corrected h5ad
+                out_path = os.path.join(output, f"corrected_{m}.h5ad")
+                corrected.write_h5ad(out_path)
+                size_mb = os.path.getsize(out_path) / 1e6
+                click.echo(f"  Saved -> {out_path} ({size_mb:.1f} MB)")
 
-            # Report mixing score
-            mixing = cellbatch.compute_batch_mixing_score(corrected, batch_key)
-            click.echo(f"  Mixing score: {mixing:.4f}")
+                # Report mixing score
+                mixing = cellbatch.compute_batch_mixing_score(corrected, batch_key)
+                click.echo(f"  Mixing score: {mixing:.4f}")
 
-            corrections[m] = corrected
-        except ImportError as e:
-            click.echo(f"  SKIPPED: {e}")
-        except Exception as e:
-            click.echo(f"  ERROR: {e}")
+                # Report peak memory for this method
+                click.echo(f"  Peak RSS so far: {mon.stats.peak_rss_mb:.1f} MB")
+
+                corrections[m] = corrected
+            except ImportError as e:
+                click.echo(f"  SKIPPED: {e}")
+            except MemoryError:
+                click.echo(f"  OUT OF MEMORY at {mon.stats.peak_rss_mb:.1f} MB RSS!")
+                click.echo(f"  Try: python run.py convert-zarr --data {data_path}")
+                click.echo(f"       python run.py correct-zarr --data <output>.zarr")
+                break
+            except Exception as e:
+                click.echo(f"  ERROR: {e}")
+
+    click.echo(f"\n--- Resource Usage ---")
+    click.echo(f"Peak RSS: {mon.stats.peak_rss_mb:.1f} MB")
 
     # Generate comparison plots if we have results
     if corrections:
@@ -1037,6 +1052,196 @@ def hk_analysis(data, output, batch_key, condition_col, pval_threshold, log2fc_t
     click.echo(f"  - {de_path}  (DE results)")
     click.echo(f"  - {output}/housekeeping_pca.png  (PCA batch visualization)")
     click.echo(f"  - {output}/housekeeping_violin*.png  (per-gene distributions)")
+
+
+# ── monitor ────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option(
+    "--pid", default=None, type=int,
+    help="Process ID to monitor. Defaults to current process.",
+)
+@click.option(
+    "--interval", default=2.0, type=float,
+    help="Seconds between samples (default: 2.0).",
+)
+@click.option(
+    "--log", "log_path", default=None,
+    type=click.Path(dir_okay=False),
+    help="Optional CSV file to log resource readings to.",
+)
+def monitor(pid, interval, log_path):
+    """Real-time system resource monitor.
+
+    Displays live RSS memory, peak memory, CPU usage, and system memory
+    utilization. Useful for watching memory during long-running batch
+    correction or merge operations.
+
+    Run in a separate terminal while another SCRIBE command executes:
+
+    \b
+        # Terminal 1: start the long-running operation
+        python run.py batch-correct --data ./output/combined.h5ad --method combat
+
+    \b
+        # Terminal 2: monitor the process
+        python run.py monitor --pid <PID_FROM_TERMINAL_1>
+
+    Or monitor the current shell (self-test):
+
+        python run.py monitor --interval 1
+
+    Press Ctrl+C to stop and print a summary.
+    """
+    cellmonitor.monitor_command(pid=pid, interval=interval, log_path=log_path)
+
+
+# ── convert-zarr ──────────────────────────────────────────────────────────────
+
+@cli.command("convert-zarr")
+@click.option(
+    "--data", "data_path", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to an .h5ad file to convert.",
+)
+@click.option(
+    "--output", "zarr_path", default=None,
+    type=click.Path(),
+    help="Output .zarr store path. Defaults to same name with .zarr extension.",
+)
+@click.option(
+    "--chunk-size", default=5000, type=int,
+    help="Number of cells per chunk (default: 5000). Smaller = less memory.",
+)
+@click.option(
+    "--overwrite", is_flag=True, default=False,
+    help="Overwrite existing .zarr store.",
+)
+def convert_zarr(data_path, zarr_path, chunk_size, overwrite):
+    """Convert an h5ad file to Zarr chunked format for memory-efficient access.
+
+    Zarr stores data in chunked arrays on disk. Each chunk can be loaded
+    independently, so you never need the full expression matrix in memory.
+    This is essential for 8 GB machines running batch correction.
+
+    Example:
+
+    \b
+        python run.py convert-zarr --data ./output/combined/combined_processed.h5ad
+        python run.py convert-zarr --data ./output/combined/combined_processed.h5ad \\
+            --chunk-size 2000 --overwrite
+    """
+    result = zarr_utils.h5ad_to_zarr(
+        data_path, zarr_path=zarr_path,
+        chunk_size=chunk_size, overwrite=overwrite,
+    )
+    click.echo(f"\nDone! Zarr store: {result}")
+    click.echo("Use 'correct-zarr' to run memory-efficient batch correction on it.")
+
+
+# ── correct-zarr ──────────────────────────────────────────────────────────────
+
+@cli.command("correct-zarr")
+@click.option(
+    "--data", "zarr_path", required=True,
+    type=click.Path(exists=True),
+    help="Path to a .zarr store (from convert-zarr).",
+)
+@click.option(
+    "--output", "output_path", default=None,
+    type=click.Path(),
+    help="Output .zarr store for corrected data. Defaults to <input>_corrected.zarr.",
+)
+@click.option(
+    "--batch-key", default="dataset",
+    help="Obs column identifying the batch (default: 'dataset').",
+)
+@click.option(
+    "--chunk-size", default=5000, type=int,
+    help="Cells per processing chunk (default: 5000).",
+)
+@click.option(
+    "--to-h5ad", is_flag=True, default=False,
+    help="Also convert the corrected Zarr store back to h5ad.",
+)
+def correct_zarr(zarr_path, output_path, batch_key, chunk_size, to_h5ad):
+    """Memory-efficient batch correction on a Zarr store.
+
+    Uses a two-pass streaming algorithm that never loads the full expression
+    matrix into memory:
+
+    \b
+      Pass 1: Compute per-batch means and variances (streaming)
+      Pass 2: Apply location-scale correction (chunk-by-chunk)
+
+    This is a location-scale adjustment equivalent to ComBat's core
+    operation, but runs in constant memory (~chunk_size × n_genes).
+
+    Example:
+
+    \b
+        # Step 1: Convert h5ad to zarr
+        python run.py convert-zarr --data ./output/combined/combined_processed.h5ad
+
+        # Step 2: Run chunked correction
+        python run.py correct-zarr --data ./output/combined/combined_processed.zarr
+
+        # Step 3 (optional): Convert back to h5ad
+        python run.py correct-zarr --data ./output/combined/combined_processed.zarr --to-h5ad
+    """
+    from cellclassifier.monitor import ResourceMonitor
+
+    click.echo("\n=== Chunked Batch Correction (Memory-Efficient) ===")
+
+    with ResourceMonitor(interval=2.0) as mon:
+        corrected_path = zarr_utils.chunked_combat(
+            zarr_path,
+            batch_key=batch_key,
+            chunk_size=chunk_size,
+            output_zarr_path=output_path,
+        )
+
+        click.echo(f"\n--- Resource Usage ---")
+        click.echo(f"Peak RSS: {mon.stats.peak_rss_mb:.1f} MB")
+
+    if to_h5ad:
+        click.echo("\n=== Converting Corrected Zarr -> h5ad ===")
+        h5ad_path = zarr_utils.zarr_to_h5ad(corrected_path, chunk_size=chunk_size)
+        click.echo(f"  h5ad: {h5ad_path}")
+
+    click.echo("\nDone!")
+
+
+# ── zarr-to-h5ad ──────────────────────────────────────────────────────────────
+
+@cli.command("zarr-to-h5ad")
+@click.option(
+    "--data", "zarr_path", required=True,
+    type=click.Path(exists=True),
+    help="Path to a .zarr store.",
+)
+@click.option(
+    "--output", "h5ad_path", default=None,
+    type=click.Path(dir_okay=False),
+    help="Output .h5ad file path. Defaults to same name with .h5ad extension.",
+)
+@click.option(
+    "--chunk-size", default=5000, type=int,
+    help="Cells per read chunk (default: 5000).",
+)
+def zarr_to_h5ad_cmd(zarr_path, h5ad_path, chunk_size):
+    """Convert a Zarr store back to h5ad format.
+
+    Reads the Zarr store chunk by chunk, assembles a sparse AnnData, and
+    writes it as h5ad. Useful after running correct-zarr to get a file
+    compatible with other SCRIBE commands.
+
+    Example:
+
+        python run.py zarr-to-h5ad --data ./output/combined/combined_processed_corrected.zarr
+    """
+    result = zarr_utils.zarr_to_h5ad(zarr_path, h5ad_path=h5ad_path, chunk_size=chunk_size)
+    click.echo(f"\nDone! h5ad: {result}")
 
 
 def main():
