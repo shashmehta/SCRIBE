@@ -253,7 +253,7 @@ def merge_datasets(
     )
 
     # Force-include housekeeping genes — needed for batch effect quantification.
-    from cellclassifier.batch import DEFAULT_HOUSEKEEPING_GENES
+    from scribe.batch import DEFAULT_HOUSEKEEPING_GENES
     hk_in_data = [g for g in DEFAULT_HOUSEKEEPING_GENES if g in combined.var_names]
     for gene in hk_in_data:
         combined.var.loc[gene, "highly_variable"] = True

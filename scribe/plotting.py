@@ -213,11 +213,16 @@ def plot_housekeeping_heatmap(
         hk_df: DataFrame with batches as rows, genes as columns.
         save_path: Path to save the figure. If None, display interactively.
     """
-    fig, ax = plt.subplots(figsize=(10, max(4, len(hk_df) * 0.8)))
-    sns.heatmap(hk_df, annot=True, fmt=".2f", cmap="YlOrRd", ax=ax)
+    fig, ax = plt.subplots(figsize=(max(8, len(hk_df.columns) * 1.5), max(3, len(hk_df) * 0.8)))
+    sns.heatmap(
+        hk_df, annot=True, fmt=".1f", cmap="YlOrRd", ax=ax,
+        annot_kws={"size": 9}, linewidths=0.5,
+    )
     ax.set_title("Housekeeping Gene Expression by Batch", fontsize=14, pad=15)
     ax.set_ylabel("Batch")
     ax.set_xlabel("Gene")
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=10)
+    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=10)
     plt.tight_layout()
 
     if save_path:

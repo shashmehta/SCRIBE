@@ -1,4 +1,4 @@
-"""Tests for cellclassifier/geo.py using synthetic in-memory data.
+"""Tests for scribe/geo.py using synthetic in-memory data.
 
 Key efficiency strategy: preprocess_adata() is the expensive step (runs UMAP,
 PCA, Leiden). It is computed ONCE via module-scoped fixtures and shared across
@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from cellclassifier.config import (
+from scribe.config import (
     CellxGeneConfig,
     DatasetConfig,
     FileConfig,
@@ -26,7 +26,7 @@ from cellclassifier.config import (
     SampleConfig,
     SourceConfig,
 )
-from cellclassifier.geo import (
+from scribe.geo import (
     annotate_cellxgene_metadata,
     assign_sample_metadata,
     convert_dataset,

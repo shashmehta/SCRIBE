@@ -1,4 +1,4 @@
-"""Tests for cellclassifier/cli.py subcommands using Click's CliRunner.
+"""Tests for scribe/cli.py subcommands using Click's CliRunner.
 
 Key efficiency strategy: CLI commands that run the ML pipeline are expensive.
 Module-scoped fixtures run each command ONCE and share the result across all
@@ -23,7 +23,7 @@ import scipy.sparse as sp
 import yaml
 from click.testing import CliRunner
 
-from cellclassifier.cli import cli
+from scribe.cli import cli
 
 # ── Shared synthetic data ─────────────────────────────────────────────────────
 # 200 cells × 50 genes is small enough that the Random Forest trains in seconds

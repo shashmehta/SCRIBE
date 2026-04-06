@@ -1,4 +1,4 @@
-"""Tests for cellclassifier/batch.py — batch effect detection and correction.
+"""Tests for scribe/batch.py — batch effect detection and correction.
 
 Synthetic data: 2 batches of 60 cells each. Batch 2 has a systematic
 expression shift on all genes, simulating a real technical batch effect.
@@ -12,7 +12,7 @@ import anndata as ad
 import scanpy as sc
 import scipy.sparse as sp
 
-from cellclassifier import batch as cellbatch
+from scribe import batch as cellbatch
 
 # ── Synthetic data ───────────────────────────────────────────────────────────
 
