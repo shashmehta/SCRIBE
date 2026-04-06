@@ -1,4 +1,4 @@
-"""Tests for cellclassifier/data.py — specifically load_condition_map and merge_datasets.
+"""Tests for scribe/data.py — specifically load_condition_map and merge_datasets.
 
 Key efficiency strategy: merge_datasets runs PCA, UMAP, and Leiden clustering,
 which is expensive. The merged result is computed ONCE via a module-scoped fixture
@@ -15,7 +15,7 @@ import pytest
 import scipy.sparse as sp
 import yaml
 
-from cellclassifier.data import load_condition_map, merge_datasets
+from scribe.data import load_condition_map, merge_datasets
 
 # ── Synthetic data constants ──────────────────────────────────────────────────
 # We need at least 31 common genes and 32 cells so sc.pp.neighbors(n_pcs=30)

@@ -11,15 +11,15 @@ from pathlib import Path
 
 import click
 
-from cellclassifier.config import load_dataset_config, load_pipeline_config
-from cellclassifier import geo
-from cellclassifier import data as celldata
-from cellclassifier import model as cellmodel
-from cellclassifier import analysis as cellanal
-from cellclassifier import plotting
-from cellclassifier import batch as cellbatch
-from cellclassifier import zarr_utils
-from cellclassifier import monitor as cellmonitor
+from scribe.config import load_dataset_config, load_pipeline_config
+from scribe import geo
+from scribe import data as celldata
+from scribe import model as cellmodel
+from scribe import analysis as cellanal
+from scribe import plotting
+from scribe import batch as cellbatch
+from scribe import zarr_utils
+from scribe import monitor as cellmonitor
 
 
 # @click.group() creates a parent command that groups sub-commands together.
@@ -56,7 +56,7 @@ def convert(config, output):
     """
     # Load the dataset YAML into a typed DatasetConfig dataclass
     cfg = load_dataset_config(config)
-    out_dir = output or "./output"
+    out_dir = output or "./output/processed"
     # Delegate all the work to geo.convert_dataset — this does loading, preprocessing, and saving
     geo.convert_dataset(cfg, out_dir)
 
@@ -449,7 +449,7 @@ def run_pipeline(config, retrain, data_path, output):
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/combined",
+    default="./output/processed",
     help="Output directory for the combined .h5ad file.",
 )
 @click.option(
@@ -475,7 +475,7 @@ def merge(data_paths, condition_map_path, output, n_top_genes, no_harmony):
             --data ./output/GSE162708_processed.h5ad \\
             --data ./output/GSE165399_processed.h5ad \\
             --condition-map configs/condition_map.yaml \\
-            --output ./output/combined
+            --output ./output/processed
     """
     os.makedirs(output, exist_ok=True)
 
@@ -511,7 +511,7 @@ def merge(data_paths, condition_map_path, output, n_top_genes, no_harmony):
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/combined",
+    default="./output/processed",
     help="Output directory for the combined .h5ad file.",
 )
 @click.option(
@@ -549,7 +549,7 @@ def build(config_paths, condition_map_path, output, skip_convert, rebuild,
             --config configs/datasets/GSE162708.yaml \\
             --config configs/datasets/GSE165399.yaml \\
             --condition-map configs/condition_map.yaml \\
-            --output ./output/combined
+            --output ./output/processed
     """
     os.makedirs(output, exist_ok=True)
     out_path = os.path.join(output, "combined_processed.h5ad")
@@ -629,7 +629,7 @@ def batch_check(data_path, output, batch_key, condition_col):
 
     Example:
 
-        python run.py batch-check --data ./output/combined/combined_processed.h5ad \\
+        python run.py batch-check --data ./output/processed/combined_processed.h5ad \\
             --output ./output/batch
     """
     import scanpy as sc
@@ -722,7 +722,7 @@ def batch_subset(data_path, output, batch_key, condition_col, conditions):
 
     Example:
 
-        python run.py batch-subset --data ./output/combined/combined_processed.h5ad \\
+        python run.py batch-subset --data ./output/processed/combined_processed.h5ad \\
             --output ./output/batch
     """
     import scanpy as sc
@@ -800,11 +800,11 @@ def batch_correct(data_path, method, output, batch_key):
 
     Example:
 
-        python run.py batch-correct --data ./output/combined/combined_processed.h5ad \\
+        python run.py batch-correct --data ./output/processed/combined_processed.h5ad \\
             --method combat --output ./output/corrected
     """
     import scanpy as sc
-    from cellclassifier.monitor import ResourceMonitor
+    from scribe.monitor import ResourceMonitor
 
     os.makedirs(output, exist_ok=True)
 
@@ -930,13 +930,13 @@ def hk_analysis(data, output, batch_key, condition_col, pval_threshold, log2fc_t
 
     Example:
 
-        python run.py hk-analysis --data ./output/combined/ --output ./output/hk_analysis
+        python run.py hk-analysis --data ./output/processed/ --output ./output/hk_analysis
 
     \b
     Scripts to read for understanding this analysis:
-      - cellclassifier/batch.py   — select_housekeeping_genes(), run_housekeeping_pca(), run_housekeeping_de()
-      - cellclassifier/plotting.py — plot_housekeeping_pca(), plot_housekeeping_violin()
-      - cellclassifier/cli.py     — this command (hk-analysis)
+      - scribe/batch.py   — select_housekeeping_genes(), run_housekeeping_pca(), run_housekeeping_de()
+      - scribe/plotting.py — plot_housekeeping_pca(), plot_housekeeping_violin()
+      - scribe/cli.py     — this command (hk-analysis)
     """
     import scanpy as sc_lib
     import anndata as ad
@@ -1081,7 +1081,7 @@ def monitor(pid, interval, log_path):
 
     \b
         # Terminal 1: start the long-running operation
-        python run.py batch-correct --data ./output/combined.h5ad --method combat
+        python run.py batch-correct --data ./output/processed.h5ad --method combat
 
     \b
         # Terminal 2: monitor the process
@@ -1127,8 +1127,8 @@ def convert_zarr(data_path, zarr_path, chunk_size, overwrite):
     Example:
 
     \b
-        python run.py convert-zarr --data ./output/combined/combined_processed.h5ad
-        python run.py convert-zarr --data ./output/combined/combined_processed.h5ad \\
+        python run.py convert-zarr --data ./output/processed/combined_processed.h5ad
+        python run.py convert-zarr --data ./output/processed/combined_processed.h5ad \\
             --chunk-size 2000 --overwrite
     """
     result = zarr_utils.h5ad_to_zarr(
@@ -1181,15 +1181,15 @@ def correct_zarr(zarr_path, output_path, batch_key, chunk_size, to_h5ad):
 
     \b
         # Step 1: Convert h5ad to zarr
-        python run.py convert-zarr --data ./output/combined/combined_processed.h5ad
+        python run.py convert-zarr --data ./output/processed/combined_processed.h5ad
 
         # Step 2: Run chunked correction
-        python run.py correct-zarr --data ./output/combined/combined_processed.zarr
+        python run.py correct-zarr --data ./output/processed/combined_processed.zarr
 
         # Step 3 (optional): Convert back to h5ad
-        python run.py correct-zarr --data ./output/combined/combined_processed.zarr --to-h5ad
+        python run.py correct-zarr --data ./output/processed/combined_processed.zarr --to-h5ad
     """
-    from cellclassifier.monitor import ResourceMonitor
+    from scribe.monitor import ResourceMonitor
 
     click.echo("\n=== Chunked Batch Correction (Memory-Efficient) ===")
 
@@ -1238,12 +1238,12 @@ def zarr_to_h5ad_cmd(zarr_path, h5ad_path, chunk_size):
 
     Example:
 
-        python run.py zarr-to-h5ad --data ./output/combined/combined_processed_corrected.zarr
+        python run.py zarr-to-h5ad --data ./output/processed/combined_processed_corrected.zarr
     """
     result = zarr_utils.zarr_to_h5ad(zarr_path, h5ad_path=h5ad_path, chunk_size=chunk_size)
     click.echo(f"\nDone! h5ad: {result}")
 
 
 def main():
-    """Entry point called by run.py and the `cellclassifier` console script."""
+    """Entry point called by run.py and the `scribe` console script."""
     cli()

@@ -1,28 +1,28 @@
 # macOS
 .DS_Store
 
-# Conda environments
-.conda/
-
 # Python
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+dist/
+build/
 
-# Output (data, model artifacts, plots)
+# Conda
+.conda/
+
+# Output (data, models, plots — stored on Google Drive via symlink)
 output/
-
-# Legacy model artifact
-model.joblib
-
-# Pytest
-.pytest_cache/
-
-# Jupyter checkpoints
-.ipynb_checkpoints/
 
 # H5AD data files
 *.h5ad
 
-# Private documentation (local reference only)
-docs/
+# Pytest
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Personal reference notes
+reference/

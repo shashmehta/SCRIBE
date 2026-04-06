@@ -10,10 +10,8 @@ SCRIBE uses Random Forest classification on gene expression data to:
 - **Classify** cells into biological conditions (e.g. normal, precancerous, malignant)
 - **Identify** top discriminating genes through feature importance analysis
 - **Analyze** differential gene expression between conditions
-- **Visualize** results with UMAP plots and feature importance charts
-- **Combine** multiple datasets for a unified cross-study model
-
-The pipeline is designed for researchers working with single-cell RNA-seq data in `.h5ad` (AnnData) format.
+- **Detect and correct** batch effects across datasets
+- **Visualize** results with UMAP plots, feature importance charts, and an interactive explorer
 
 ## Datasets
 
@@ -31,7 +29,7 @@ These are unified into a 3-class scheme: **normal / precancerous / malignant**.
 
 ### Prerequisites
 
-- Python 3.12
+- Python 3.10+
 - Conda (recommended for environment management)
 
 ### Setup
@@ -44,133 +42,143 @@ These are unified into a 3-class scheme: **normal / precancerous / malignant**.
 
 2. **Create and activate conda environment:**
    ```bash
-   conda create -n scribe python=3.12
-   conda activate scribe
+   conda create -n NAME python=3.10
+   conda activate NAME
    ```
 
-3. **Install dependencies:**
+3. **Install the package:**
    ```bash
-   pip install -r requirements.txt
+   pip install -e .
    ```
+
+4. **Set up Google Drive data folder:**
+
+   SCRIBE keeps **no data on local disk**. All raw datasets, processed files, model artifacts, and plots live on Google Drive, shared as "anyone with link" so collaborators can access them.
+
+   The project's `output/` directory is a symlink to your Google Drive folder. To set it up:
+
+   ```bash
+   # macOS (Google Drive for Desktop):
+   ln -s "/Users/YOU/Library/CloudStorage/GoogleDrive-YOUR_EMAIL/.shortcut-targets-by-id/FOLDER_ID/SCRIBE" ./output
+
+   # Linux:
+   ln -s ~/google-drive/SCRIBE ./output
+   ```
+
+   > **Google Drive folder structure:**
+   > ```
+   > SCRIBE/                          (shared Google Drive folder)
+   > ├── GSE154778/                   Raw GEO dataset files
+   > ├── GSE162708/                   Raw GEO dataset files
+   > ├── GSE165399/                   Raw GEO dataset files
+   > ├── processed/                   Processed h5ad files, model artifacts, zarr stores
+   > │   ├── GSE154778_processed.h5ad
+   > │   ├── GSE162708_processed.h5ad
+   > │   ├── GSE165399_processed.h5ad
+   > │   ├── combined_processed.h5ad
+   > │   ├── combined_processed_corrected.h5ad
+   > │   ├── combined_processed.zarr/
+   > │   ├── combined_processed_corrected.zarr/
+   > │   ├── model_artifact.joblib
+   > │   └── app_cache/              Parquet cache for Marimo app
+   > └── plots/                      All generated plots
+   >     ├── malignant_uncorrected_vs_corrected.png
+   >     ├── normal_uncorrected_vs_corrected.png
+   >     ├── hk_pca_uncorrected_vs_corrected.png
+   >     └── hk_analysis/            Housekeeping gene analysis plots
+   > ```
+
+   The pipeline reads raw data from `output/GSE*/`, writes processed data to `output/processed/`, and saves plots to `output/plots/`. Since `output/` points to Google Drive, everything is automatically synced and available to collaborators.
 
 ## Usage
 
-SCRIBE is run through `run.py` using sub-commands (similar to how `git commit` and `git push` are sub-commands of `git`).
+After installation, use the `scribe` CLI command (or `python run.py` as an alternative).
 
-### Step 1 — Inspect raw data (optional but recommended)
-
-Before converting a dataset, you can inspect its barcode structure to confirm sample demultiplexing will work:
+### Step 1 — Convert GEO datasets to `.h5ad`
 
 ```bash
-python run.py inspect --config configs/datasets/GSE154778.yaml
+scribe convert --config configs/datasets/GSE154778.yaml --output ./output/processed
+scribe convert --config configs/datasets/GSE162708.yaml --output ./output/processed
+scribe convert --config configs/datasets/GSE165399.yaml --output ./output/processed
 ```
 
-This prints the barcode suffix distribution so you can fill in the `barcode_suffix` values in the YAML.
-
-### Step 2 — Convert GEO datasets to `.h5ad`
+### Step 2 — Merge datasets
 
 ```bash
-python run.py convert --config configs/datasets/GSE154778.yaml --output ./output
-python run.py convert --config configs/datasets/GSE162708.yaml --output ./output
-python run.py convert --config configs/datasets/GSE165399.yaml --output ./output
-```
-
-Each produces a processed `.h5ad` file with UMAP embeddings and cellxGene-compliant metadata.
-
-### Step 3 — Run per-dataset analysis (optional)
-
-Train and evaluate a classifier on each dataset individually:
-
-```bash
-python run.py run --config configs/pipeline.yaml \
-    --data ./output/GSE154778_processed.h5ad \
-    --output ./output/GSE154778
-```
-
-### Step 4 — Merge datasets for combined training
-
-```bash
-python run.py merge \
+scribe merge \
     --data ./output/GSE154778_processed.h5ad \
     --data ./output/GSE162708_processed.h5ad \
     --data ./output/GSE165399_processed.h5ad \
     --condition-map configs/condition_map.yaml \
-    --output ./output/combined
+    --output ./output/processed
 ```
 
-This remaps all condition labels to the unified 3-class scheme and produces `combined_processed.h5ad`.
-
-### Step 5 — Train 3-class combined model
+### Step 3 — Batch correction
 
 ```bash
-python run.py run --config configs/pipeline.yaml \
-    --data ./output/combined/combined_processed.h5ad \
-    --output ./output/combined
+# Memory-efficient ComBat via Zarr chunked pipeline:
+scribe convert-zarr --input ./output/processed/combined_processed.h5ad --output ./output/processed/
+scribe correct-zarr --input ./output/processed/combined_processed.zarr --output ./output/processed/ --to-h5ad
 ```
 
-Produces a model that classifies cells as **normal**, **precancerous**, or **malignant** across all three datasets.
+### Step 4 — Train and evaluate
+
+```bash
+scribe run --config configs/pipeline.yaml \
+    --data ./output/processed/combined_processed.h5ad \
+    --output ./output/processed
+```
+
+### Step 5 — Interactive explorer
+
+```bash
+marimo run app.py --include-code
+```
+
+Opens a browser-based app for exploring gene distributions before/after batch correction and browsing analysis plots.
 
 ### Other commands
 
 ```bash
-# Evaluate a saved model on new data
-python run.py evaluate --config configs/pipeline.yaml \
-    --model ./output/model_artifact.joblib \
-    --data ./output/new_data.h5ad
-
-# Generate plots from a saved model
-python run.py plot --config configs/pipeline.yaml \
-    --model ./output/model_artifact.joblib \
-    --output ./output
-
-# Force retrain even if a model already exists
-python run.py run --config configs/pipeline.yaml --retrain
-```
-
-## Output Structure
-
-```
-output/
-├── GSE154778_processed.h5ad      # Per-dataset converted file
-├── GSE162708_processed.h5ad
-├── GSE165399_processed.h5ad
-├── combined/
-│   ├── combined_processed.h5ad   # Merged 3-dataset file
-│   ├── model_artifact.joblib     # Trained 3-class RF model
-│   └── plots/
-│       ├── umap_condition.png    # UMAP colored by condition
-│       ├── umap_dataset.png      # UMAP colored by dataset source
-│       └── feature_importances.png
-└── GSE154778/                    # Per-dataset analysis output
-    ├── model_artifact.joblib
-    └── plots/
+scribe inspect --config configs/datasets/GSE154778.yaml  # Inspect barcode structure
+scribe batch-check --data ./output/processed/combined_processed.h5ad  # Diagnose batch effects
+scribe hk-analysis --data ./output/processed/combined_processed.h5ad --output ./output/plots/hk_analysis  # HK gene analysis
+scribe monitor  # Real-time system resource monitoring
 ```
 
 ## Project Structure
 
 ```
 SCRIBE/
-├── cellclassifier/           # Main Python package
+├── pyproject.toml           # Package config and dependencies
+├── run.py                   # Convenience CLI entry point
+├── app.py                   # Marimo interactive explorer
+├── conftest.py              # pytest configuration
+├── README.md
+├── CLAUDE.md
+├── .gitignore
+├── scribe/                  # Main Python package
 │   ├── __init__.py
-│   ├── cli.py               # CLI sub-commands (convert, inspect, merge, run, ...)
-│   ├── config.py            # YAML config loading into dataclasses
-│   ├── data.py              # Data loading, merging, and ML feature extraction
-│   ├── geo.py               # GEO raw data loading and preprocessing
-│   ├── model.py             # RF training, evaluation, and artifact save/load
-│   ├── analysis.py          # Differential expression analysis
-│   └── plotting.py          # UMAP and feature importance plots
-├── configs/
-│   ├── pipeline.yaml        # ML pipeline settings (RF hyperparameters, etc.)
-│   ├── condition_map.yaml   # Maps per-dataset conditions to normal/precancerous/malignant
+│   ├── cli.py               # CLI sub-commands
+│   ├── config.py            # YAML config dataclasses
+│   ├── data.py              # Data loading, merging, preprocessing
+│   ├── geo.py               # GEO raw data loaders
+│   ├── model.py             # RF training, evaluation, artifacts
+│   ├── analysis.py          # Differential expression
+│   ├── plotting.py          # UMAP, feature importance, diagnostic plots
+│   ├── batch.py             # Batch effect detection and correction
+│   ├── monitor.py           # System resource monitoring
+│   ├── zarr_utils.py        # Memory-efficient Zarr I/O
+│   └── cache.py             # Parquet cache for interactive app
+├── tests/                   # Test suite
+├── configs/                 # Pipeline and dataset YAML configs
+│   ├── pipeline.yaml
+│   ├── condition_map.yaml
 │   └── datasets/
-│       ├── GSE154778.yaml
-│       ├── GSE162708.yaml
-│       └── GSE165399.yaml
-├── tests/                   # Test suite (50 tests)
-├── run.py                   # Entry point
-├── requirements.txt
-└── docs/
-    └── CODEBASE_GUIDE.md    # Detailed technical guide
+└── output/ → Google Drive   # Symlink — all data lives on Drive
+    ├── GSE*/                # Raw GEO dataset files
+    ├── processed/           # Processed h5ad, models, zarr stores
+    └── plots/               # Analysis plots
 ```
 
 ## How It Works
@@ -180,43 +188,25 @@ SCRIBE/
 ```
 GEO Datasets (3 studies)
         │
-        ▼  python run.py convert
+        ▼  scribe convert
   Per-dataset .h5ad files
   (normalized, UMAP embedded)
         │
-        ▼  python run.py merge
+        ▼  scribe merge
   Combined .h5ad (3-class labels:
   normal / precancerous / malignant)
         │
-        ▼  python run.py run
+        ▼  scribe correct-zarr
+  Batch-corrected .h5ad
+  (ComBat via memory-efficient Zarr pipeline)
+        │
+        ▼  scribe run
   3-class Random Forest model
         │
         ├── Feature importances (top biomarker genes)
         ├── Differential expression (normal vs malignant)
         └── UMAP plots (by condition, dataset, top genes)
 ```
-
-### The 3-Class Condition Scheme
-
-Conditions from the three datasets are unified by `configs/condition_map.yaml`:
-
-| Original label | Dataset | Unified class |
-|---------------|---------|---------------|
-| normal | GSE162708, GSE165399 | normal |
-| primary, primary_tumor | GSE154778, GSE162708 | malignant |
-| metastatic, metastasis | GSE154778, GSE162708 | malignant |
-| PASC | GSE165399 | malignant |
-| IPMN | GSE165399 | precancerous |
-
-### Key Dependencies
-
-- **scanpy** — Single-cell analysis toolkit (preprocessing, UMAP, clustering)
-- **anndata** — AnnData format for single-cell data
-- **scikit-learn** — Random Forest classifier
-- **matplotlib** — Plotting
-- **pandas / numpy** — Data manipulation
-- **click** — CLI framework
-- **pyyaml** — YAML config loading
 
 ## Scientific Background
 
@@ -234,14 +224,11 @@ Random Forests handle high-dimensional data (thousands of genes) well and provid
 
 ## Troubleshooting
 
+**Out of memory during batch correction**
+Use the Zarr chunked pipeline: `scribe convert-zarr` then `scribe correct-zarr`. This processes data in constant memory (~900MB peak).
+
 **Barcode suffixes show as `null` in the YAML**
-Run `python run.py inspect --config configs/datasets/GSE154778.yaml` to see the actual suffix distribution, then fill in the values.
+Run `scribe inspect --config configs/datasets/GSE154778.yaml` to see the actual suffix distribution.
 
 **`ValueError: Column 'condition' not found`**
-Run `convert` first to produce a processed `.h5ad` before running `run`.
-
-**Out of memory during processing**
-Reduce `n_top_genes` in the dataset YAML (e.g., from 2000 to 1000).
-
-**Google Drive download fails**
-Ensure the file is publicly shared ("Anyone with the link can view").
+Run `scribe convert` first to produce a processed `.h5ad` before running `scribe run`.
