@@ -29,66 +29,102 @@ These are unified into a 3-class scheme: **normal / precancerous / malignant**.
 
 ### Prerequisites
 
-- Python 3.10+
-- Conda (recommended for environment management)
+- **Python 3.10+**
+- **Conda** (recommended for environment management)
+- **Google Drive for Desktop** — required for data storage (see Step 4)
 
 ### Setup
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/SCRIBE.git
-   cd SCRIBE
+   git clone https://github.com/shashmehta/CellClassifier.git
+   cd CellClassifier
    ```
 
 2. **Create and activate conda environment:**
    ```bash
-   conda create -n NAME python=3.10
-   conda activate NAME
+   conda create -n scribe python=3.10
+   conda activate scribe
    ```
 
 3. **Install the package:**
    ```bash
    pip install -e .
    ```
+   > **Note:** Run this from the repository root (where `pyproject.toml` is), not from inside the `scribe/` subdirectory.
 
-4. **Set up Google Drive data folder:**
+4. **Set up Google Drive for Desktop (required):**
 
-   SCRIBE keeps **no data on local disk**. All raw datasets, processed files, model artifacts, and plots live on Google Drive, shared as "anyone with link" so collaborators can access them.
+   SCRIBE stores **no data on local disk**. All raw datasets, processed files, model artifacts, and plots are stored on Google Drive so they sync automatically across machines and collaborators.
 
-   The project's `output/` directory is a symlink to your Google Drive folder. To set it up:
+   The project uses a local `output/` symlink that points to a shared Google Drive folder. Every CLI command writes to `output/` by default, so once the symlink is configured, all data flows to Drive automatically.
 
-   ```bash
-   # macOS (Google Drive for Desktop):
-   ln -s "/Users/YOU/Library/CloudStorage/GoogleDrive-YOUR_EMAIL/.shortcut-targets-by-id/FOLDER_ID/SCRIBE" ./output
+   #### Step 4a — Install Google Drive for Desktop
 
-   # Linux:
-   ln -s ~/google-drive/SCRIBE ./output
+   Download and install [Google Drive for Desktop](https://www.google.com/drive/download/). Sign in with your Google account. Once installed, Drive mounts a local folder that stays in sync with your cloud storage.
+
+   The mount location depends on your OS:
+   | OS | Default mount path |
+   |---|---|
+   | **macOS** | `/Users/YOU/Library/CloudStorage/GoogleDrive-YOUR_EMAIL/` |
+   | **Windows** | `G:\My Drive\` (or whichever drive letter is assigned) |
+   | **Linux** | `~/google-drive/` (varies by setup) |
+
+   #### Step 4b — Locate or create the SCRIBE folder
+
+   The shared SCRIBE data folder lives on Google Drive. If you've been given access to an existing shared folder, find it in your Google Drive and note its local path. If starting fresh, create a folder on Google Drive named `SCRIBE` with this structure:
+
+   ```
+   SCRIBE/                          (Google Drive folder)
+   ├── GSE154778/                   Raw GEO dataset files
+   ├── GSE162708/                   Raw GEO dataset files
+   ├── GSE165399/                   Raw GEO dataset files
+   ├── processed/                   Processed h5ad files, model artifacts, zarr stores
+   │   ├── GSE154778_processed.h5ad
+   │   ├── GSE162708_processed.h5ad
+   │   ├── GSE165399_processed.h5ad
+   │   ├── combined_processed.h5ad
+   │   ├── combined_processed_corrected.h5ad
+   │   ├── combined_processed.zarr/
+   │   ├── combined_processed_corrected.zarr/
+   │   ├── model_artifact.joblib
+   │   └── app_cache/              Parquet cache for Marimo app
+   └── plots/                      All generated plots
+       ├── malignant_uncorrected_vs_corrected.png
+       ├── normal_uncorrected_vs_corrected.png
+       ├── hk_pca_uncorrected_vs_corrected.png
+       └── hk_analysis/            Housekeeping gene analysis plots
    ```
 
-   > **Google Drive folder structure:**
-   > ```
-   > SCRIBE/                          (shared Google Drive folder)
-   > ├── GSE154778/                   Raw GEO dataset files
-   > ├── GSE162708/                   Raw GEO dataset files
-   > ├── GSE165399/                   Raw GEO dataset files
-   > ├── processed/                   Processed h5ad files, model artifacts, zarr stores
-   > │   ├── GSE154778_processed.h5ad
-   > │   ├── GSE162708_processed.h5ad
-   > │   ├── GSE165399_processed.h5ad
-   > │   ├── combined_processed.h5ad
-   > │   ├── combined_processed_corrected.h5ad
-   > │   ├── combined_processed.zarr/
-   > │   ├── combined_processed_corrected.zarr/
-   > │   ├── model_artifact.joblib
-   > │   └── app_cache/              Parquet cache for Marimo app
-   > └── plots/                      All generated plots
-   >     ├── malignant_uncorrected_vs_corrected.png
-   >     ├── normal_uncorrected_vs_corrected.png
-   >     ├── hk_pca_uncorrected_vs_corrected.png
-   >     └── hk_analysis/            Housekeeping gene analysis plots
-   > ```
+   #### Step 4c — Create the `output/` symlink
 
-   The pipeline reads raw data from `output/GSE*/`, writes processed data to `output/processed/`, and saves plots to `output/plots/`. Since `output/` points to Google Drive, everything is automatically synced and available to collaborators.
+   From the repository root, create a symlink named `output` pointing to your Google Drive SCRIBE folder:
+
+   **macOS:**
+   ```bash
+   # Replace YOUR_EMAIL and FOLDER_PATH with your actual values.
+   # To find the path: right-click the SCRIBE folder in Finder → "Get Info" → copy the "Where" path.
+   ln -s "/Users/YOU/Library/CloudStorage/GoogleDrive-YOUR_EMAIL/.shortcut-targets-by-id/FOLDER_ID/FOLDER_PATH/SCRIBE" ./output
+   ```
+
+   **Linux:**
+   ```bash
+   ln -s ~/google-drive/path/to/SCRIBE ./output
+   ```
+
+   **Windows (PowerShell as admin):**
+   ```powershell
+   New-Item -ItemType SymbolicLink -Path .\output -Target "G:\My Drive\path\to\SCRIBE"
+   ```
+
+   #### Verify the symlink
+
+   ```bash
+   ls output/
+   # Should show: GSE154778/  GSE162708/  GSE165399/  processed/  plots/
+   ```
+
+   > **How it works:** All CLI commands default to writing under `./output/` (e.g. `--output ./output/processed`). Since `output/` is a symlink to Google Drive, processed data and plots are automatically synced to the cloud. No additional configuration is needed — just run the pipeline and everything lands on Drive.
 
 ## Usage
 
