@@ -1034,16 +1034,110 @@ def hk_analysis(data, output, batch_key, condition_col, pval_threshold, log2fc_t
     # ── Step 5: Generate diagnostic plots ──
     click.echo("\n=== Generating Plots ===")
 
-    # PCA scatter plots (colored by dataset and condition)
-    plotting.plot_housekeeping_pca(adata_hk, batch_key, condition_col, save_dir=output)
+    # PCA scatter plots (colored by dataset and condition). Each plot is
+    # wrapped so one failure doesn't block the rest of the pipeline.
+    try:
+        plotting.plot_housekeeping_pca(adata_hk, batch_key, condition_col, save_dir=output)
+    except Exception as _exc:
+        click.echo(f"  Skipping HK PCA plot: {_exc}")
 
     # Per-gene violin plots showing expression distributions across datasets
-    plotting.plot_housekeeping_violin(adata, hk_genes, batch_key, save_dir=output)
+    try:
+        plotting.plot_housekeeping_violin(adata, hk_genes, batch_key, save_dir=output)
+    except Exception as _exc:
+        click.echo(f"  Skipping HK violin plot: {_exc}")
 
     # Also save the existing housekeeping heatmap for comparison
-    hk_heatmap_path = os.path.join(output, "housekeeping_heatmap.png")
-    plotting.plot_housekeeping_heatmap(hk_expr, save_path=hk_heatmap_path)
-    click.echo(f"  Saved HK heatmap -> {hk_heatmap_path}")
+    try:
+        hk_heatmap_path = os.path.join(output, "housekeeping_heatmap.png")
+        plotting.plot_housekeeping_heatmap(hk_expr, save_path=hk_heatmap_path)
+        click.echo(f"  Saved HK heatmap -> {hk_heatmap_path}")
+    except Exception as _exc:
+        click.echo(f"  Skipping HK heatmap: {_exc}")
+
+    # HK ↔ target-gene relationship preservation plot.
+    # Requires the corrected counterpart of the input to exist. We auto-detect
+    # it by looking for a sibling file with the _corrected suffix; if the user
+    # passed a directory, we fall back to combined_processed_corrected.h5ad in
+    # the same directory.
+    click.echo("\n=== HK ↔ Gene Relationship (before vs after correction) ===")
+    try:
+        import numpy as np
+        import pandas as pd
+        import scipy.sparse as _sp_local
+
+        data_path = Path(data)
+        if data_path.is_dir():
+            corrected_candidate = data_path / "combined_processed_corrected.h5ad"
+        else:
+            corrected_candidate = data_path.with_name(
+                data_path.stem + "_corrected" + data_path.suffix
+            )
+
+        if not corrected_candidate.exists():
+            click.echo(
+                f"  Skipping — corrected counterpart not found at {corrected_candidate}. "
+                "Run `scribe batch-correct` first to generate it."
+            )
+        else:
+            click.echo(f"  Loading corrected counterpart: {corrected_candidate}")
+            adata_corr = sc_lib.read_h5ad(str(corrected_candidate))
+
+            # Align by cell barcode: corrected files may have been re-ordered.
+            # Intersect obs_names to guarantee matching rows.
+            common_cells = adata.obs_names.intersection(adata_corr.obs_names)
+            if len(common_cells) < 10:
+                click.echo(
+                    f"  Skipping — fewer than 10 cells common between uncorrected "
+                    f"({adata.n_obs}) and corrected ({adata_corr.n_obs}) files."
+                )
+            else:
+                adata_u = adata[common_cells].copy()
+                adata_c = adata_corr[common_cells].copy()
+
+                # Pick target genes: top 30 most variable in the uncorrected data,
+                # excluding the HK genes themselves.
+                Xu = adata_u.X
+                if _sp_local.issparse(Xu):
+                    var_per_gene = np.asarray((Xu.power(2)).mean(axis=0)).ravel() - \
+                        np.asarray(Xu.mean(axis=0)).ravel() ** 2
+                else:
+                    var_per_gene = Xu.var(axis=0)
+                var_series = pd.Series(var_per_gene, index=adata_u.var_names)
+                var_series = var_series.drop(labels=[g for g in hk_genes if g in var_series.index])
+                target_genes = var_series.sort_values(ascending=False).head(30).index.tolist()
+
+                # Keep only targets that also exist in the corrected frame
+                target_genes = [g for g in target_genes if g in adata_c.var_names]
+                click.echo(
+                    f"  Using {len(hk_genes)} HK genes × {len(target_genes)} target (top HVG) genes."
+                )
+
+                # Dense submatrices for the union of genes we care about
+                genes_needed = list(dict.fromkeys(list(hk_genes) + target_genes))
+                Xu_sub = adata_u[:, genes_needed].X
+                Xc_sub = adata_c[:, genes_needed].X
+                if _sp_local.issparse(Xu_sub):
+                    Xu_sub = Xu_sub.toarray()
+                if _sp_local.issparse(Xc_sub):
+                    Xc_sub = Xc_sub.toarray()
+
+                uncorr_expr = pd.DataFrame(Xu_sub, columns=genes_needed)
+                corr_expr = pd.DataFrame(Xc_sub, columns=genes_needed)
+                obs_df = adata_u.obs[[batch_key]].reset_index(drop=True)
+
+                hk_rel_path = os.path.join(output, "hk_gene_relationship.png")
+                plotting.plot_hk_gene_relationship(
+                    uncorr_expr=uncorr_expr,
+                    corr_expr=corr_expr,
+                    obs=obs_df,
+                    hk_genes=hk_genes,
+                    target_genes=target_genes,
+                    batch_key=batch_key,
+                    save_path=hk_rel_path,
+                )
+    except Exception as _exc:
+        click.echo(f"  Skipping HK↔gene relationship plot: {_exc}")
 
     click.echo(f"\n=== Housekeeping Gene Analysis Complete ===")
     click.echo(f"Results saved to {output}/")
