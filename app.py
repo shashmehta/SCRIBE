@@ -1,11 +1,13 @@
 import marimo
 
+__generated_with = "0.22.4"
 app = marimo.App(width="full")
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -16,19 +18,18 @@ def _():
     import pandas as pd
     import numpy as np
     from pathlib import Path
-    return Path, np, pd, plt, sns
+
+    return Path, plt, sns
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        # SCRIBE — Batch Correction Explorer
+    mo.md("""
+    # SCRIBE — Batch Correction Explorer
 
-        Inspect gene expression distributions before and after ComBat batch correction,
-        and browse existing UMAP / PCA plots.
-        """
-    )
+    Inspect gene expression distributions before and after ComBat batch correction,
+    and browse existing UMAP / PCA plots.
+    """)
     return
 
 
@@ -47,7 +48,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo, gene_list):
+def _(gene_list, mo):
     from scribe.batch import DEFAULT_HOUSEKEEPING_GENES, CANDIDATE_HOUSEKEEPING_GENES
 
     available_hk = [g for g in DEFAULT_HOUSEKEEPING_GENES if g in gene_list]
@@ -74,7 +75,7 @@ def _(mo, gene_list):
 
 
 @app.cell
-def _(mo, cache, gene_selector, hk_button, available_hk, obs, plt, sns):
+def _(available_hk, cache, gene_selector, hk_button, mo, obs, plt, sns):
     _COLORS = {"GSE154778": "#e41a1c", "GSE162708": "#377eb8", "GSE165399": "#4daf4a"}
 
     # Use HK genes if button was clicked, otherwise use multiselect
@@ -118,7 +119,72 @@ def _(mo, cache, gene_selector, hk_button, available_hk, obs, plt, sns):
 
 
 @app.cell
-def _(mo, Path):
+def _(available_hk, gene_list, mo):
+    # Default target genes: a small curated set of well-known markers if present,
+    # otherwise fall back to a slice of the gene list (user is expected to edit).
+    _default_target_candidates = [
+        "INS", "GCG", "SST", "PPY", "KRT19", "REG1A", "PRSS1", "CFTR",
+        "CD8A", "CD4", "CD68", "VIM", "EPCAM", "MKI67", "TP53", "KRAS",
+    ]
+    _default_targets = [g for g in _default_target_candidates if g in gene_list and g not in available_hk]
+    if not _default_targets:
+        _default_targets = [g for g in gene_list[:10] if g not in available_hk]
+
+    _target_options = sorted([g for g in gene_list if g not in available_hk])
+
+    target_selector = mo.ui.multiselect(
+        options=_target_options,
+        value=_default_targets,
+        label="Target genes (up to 40)",
+        max_selections=40,
+    )
+
+    mo.vstack([
+        mo.md("### HK ↔ Gene Relationship Preservation"),
+        mo.md(
+            "For each housekeeping × target gene pair, computes the Pearson "
+            "correlation *within each batch*, averages across batches, and "
+            "compares the before vs after batch correction. Pairs near the "
+            "y=x diagonal in the right panel are biologically preserved."
+        ),
+        target_selector,
+    ])
+    return (target_selector,)
+
+
+@app.cell
+def _(available_hk, cache, mo, obs, target_selector):
+    from scribe.plotting import plot_hk_gene_relationship
+
+    _targets = list(target_selector.value or [])
+
+    if len(available_hk) < 1 or len(_targets) < 1:
+        _hk_rel_output = mo.md(
+            "*Need at least one housekeeping gene (auto-loaded) and one target "
+            "gene selected above.*"
+        )
+    else:
+        _needed = list(dict.fromkeys(list(available_hk) + _targets))
+        _uncorr = cache.load_gene_expression(_needed, corrected=False)
+        _corr = cache.load_gene_expression(_needed, corrected=True)
+
+        _fig = plot_hk_gene_relationship(
+            uncorr_expr=_uncorr,
+            corr_expr=_corr,
+            obs=obs,
+            hk_genes=list(available_hk),
+            target_genes=_targets,
+            batch_key="dataset",
+            save_path=None,
+        )
+        _hk_rel_output = mo.as_html(_fig)
+
+    _hk_rel_output
+    return
+
+
+@app.cell
+def _(Path, mo):
     plot_dir = Path("output/plots")
 
     # Map friendly display names to file paths
@@ -127,6 +193,7 @@ def _(mo, Path):
         "UMAP: Normal cells (before vs after correction)": "normal_uncorrected_vs_corrected.png",
         "PCA: Housekeeping genes (before vs after correction)": "hk_pca_uncorrected_vs_corrected.png",
         "HK Analysis: Housekeeping gene PCA": "hk_analysis/housekeeping_pca.png",
+        "HK Analysis: HK ↔ Gene Relationship (before vs after)": "hk_analysis/hk_gene_relationship.png",
     }
 
     # Only include plots that actually exist on disk
@@ -151,7 +218,7 @@ def _(mo, Path):
 
 
 @app.cell
-def _(mo, gallery_dropdown, plot_options, Path):
+def _(Path, gallery_dropdown, mo, plot_options):
     import base64 as _b64
 
     if gallery_dropdown.value and gallery_dropdown.value in plot_options:
@@ -171,12 +238,10 @@ def _(mo, gallery_dropdown, plot_options, Path):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ---
-        *SCRIBE Batch Correction Explorer — data from Google Drive*
-        """
-    )
+    mo.md("""
+    ---
+    *SCRIBE Batch Correction Explorer — data from Google Drive*
+    """)
     return
 
 
