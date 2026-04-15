@@ -24,5 +24,8 @@ output/
 # Jupyter
 .ipynb_checkpoints/
 
+# Marimo session cache (cell outputs, regenerated on each run)
+__marimo__/
+
 # Personal reference notes
 reference/
