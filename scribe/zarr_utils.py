@@ -407,6 +407,233 @@ def chunked_combat(
     return output_zarr_path
 
 
+def chunked_harmony(
+    zarr_path: str,
+    batch_key: str = "dataset",
+    n_pcs: int = 50,
+    source_h5ad: str | None = None,
+    output_zarr_path: str | None = None,
+) -> str:
+    """Memory-efficient Harmony batch correction on a Zarr store.
+
+    Harmony corrects the PCA embedding rather than the gene expression
+    matrix. The step itself is cheap — only the (n_cells × n_pcs) PCA
+    matrix is loaded. We keep the zarr-backed pattern to avoid loading
+    the full X matrix alongside downstream inverse-PCA reconstruction.
+
+    Pipeline:
+    1. Read obsm['X_pca'] from the input zarr (small, ~9 MB).
+    2. Run harmonypy on (X_pca, obs[batch_key]).
+    3. Copy X, obs, var, obsm from input -> output zarr.
+    4. Write obsm['X_pca_harmony'] (corrected PC coordinates).
+    5. Copy varm['PCs'] (gene loadings) from source_h5ad if provided —
+       needed by chunked_inverse_pca() to project PCs back to gene space.
+
+    Args:
+        zarr_path: Input zarr store (from h5ad_to_zarr).
+        batch_key: Obs column identifying the batch.
+        n_pcs: Number of PCs to feed into Harmony.
+        source_h5ad: Path to the original h5ad (supplies varm['PCs']).
+            If None, the output zarr will lack varm — downstream
+            inverse-PCA will need to refit loadings.
+        output_zarr_path: Output path. Defaults to <input>_harmony.zarr.
+
+    Returns:
+        Path to the Harmony-corrected Zarr store.
+    """
+    import zarr
+    try:
+        import harmonypy
+    except ImportError:
+        raise ImportError(
+            "harmonypy is required for Harmony batch correction. "
+            "Install it with: pip install harmonypy"
+        )
+
+    if output_zarr_path is None:
+        output_zarr_path = zarr_path.replace(".zarr", "_harmony.zarr")
+
+    print(f"Chunked Harmony correction: {zarr_path}")
+    zdata = load_zarr_backed(zarr_path)
+    n_obs = zdata["n_obs"]
+    n_vars = zdata["n_vars"]
+
+    batch_labels = zdata["obs"].get(batch_key)
+    if batch_labels is None:
+        raise ValueError(f"Batch key '{batch_key}' not found in obs columns")
+
+    if "X_pca" not in zdata["obsm"]:
+        raise ValueError(
+            "obsm['X_pca'] is missing from the zarr store. "
+            "Run the standard preprocessing pipeline to generate it before Harmony."
+        )
+
+    X_pca = np.asarray(zdata["obsm"]["X_pca"])[:, :n_pcs]
+    print(f"  {n_obs} cells × {n_vars} genes, PCA shape {X_pca.shape}")
+
+    # Build a minimal pandas DataFrame for harmony (it wants a DataFrame
+    # column named batch_key).
+    import pandas as pd
+    meta = pd.DataFrame({batch_key: batch_labels})
+    print(f"  Running Harmony on {n_pcs} PCs, batch_key='{batch_key}'...")
+    # Force CPU device: MPS (Apple GPU) has OpenMP conflicts with sklearn.KMeans
+    # and segfaults on macOS. CPU is slower but reliable.
+    try:
+        harmony_out = harmonypy.run_harmony(X_pca, meta, batch_key, device="cpu")
+    except TypeError:
+        # Older harmonypy without `device` kwarg
+        harmony_out = harmonypy.run_harmony(X_pca, meta, batch_key)
+
+    Z = harmony_out.Z_corr
+    if hasattr(Z, "numpy"):
+        Z = Z.numpy()
+    Z = np.asarray(Z, dtype=np.float32)
+    if Z.shape[0] == n_pcs and Z.shape[1] == n_obs:
+        Z = Z.T
+    assert Z.shape == (n_obs, n_pcs), f"Unexpected Harmony output shape: {Z.shape}"
+    print(f"  Harmony output shape: {Z.shape}")
+
+    # ── Write output zarr ────────────────────────────────────────────────
+    if os.path.exists(output_zarr_path):
+        shutil.rmtree(output_zarr_path)
+    out_store = zarr.open(output_zarr_path, mode="w")
+    in_store = zarr.open(zarr_path, mode="r")
+
+    # Copy X, obs, var, obsm unchanged
+    for group_name in ["X", "obs", "var", "obsm"]:
+        if group_name in in_store:
+            zarr.copy(in_store[group_name], out_store, name=group_name)
+
+    # Add X_pca_harmony
+    obsm_out = out_store["obsm"]
+    obsm_out.create_dataset(
+        "X_pca_harmony", data=Z,
+        chunks=(min(5000, n_obs), n_pcs),
+    )
+
+    # Copy varm['PCs'] and gene means from the source h5ad if available.
+    # varm is needed by chunked_inverse_pca() to project back to gene space.
+    if source_h5ad is not None and os.path.exists(source_h5ad):
+        print(f"  Copying varm['PCs'] from {source_h5ad}...")
+        import scanpy as sc
+        src = sc.read_h5ad(source_h5ad)
+        if "PCs" in src.varm:
+            varm_grp = out_store.create_group("varm")
+            varm_grp.create_dataset(
+                "PCs", data=np.asarray(src.varm["PCs"], dtype=np.float32),
+            )
+            print(f"    PCs shape: {src.varm['PCs'].shape}")
+        else:
+            print("    WARNING: source h5ad has no varm['PCs']; inverse PCA will need to refit.")
+        del src
+
+    out_store.attrs.update(dict(in_store.attrs))
+    zarr.consolidate_metadata(output_zarr_path)
+
+    size_mb = sum(
+        f.stat().st_size for f in Path(output_zarr_path).rglob("*") if f.is_file()
+    ) / 1e6
+    print(f"  Harmony store saved: {output_zarr_path} ({size_mb:.1f} MB)")
+
+    return output_zarr_path
+
+
+def chunked_inverse_pca(
+    zarr_path: str,
+    output_zarr_path: str | None = None,
+    rep: str = "X_pca_harmony",
+    chunk_size: int = 5000,
+) -> str:
+    """Reconstruct an approximate gene-expression matrix from a PC embedding.
+
+    After Harmony corrects PC coordinates, we project them back to gene
+    space so the KDE and HK-PCA viewers can treat Harmony as a peer of
+    ComBat. This is a **lossy truncated reconstruction** — only variance
+    captured by the top-n_pcs PCs is recovered.
+
+    Formula (X already centered/scaled by sc.pp.scale):
+        X_hat = X_pca_harmony @ PCs.T
+
+    Args:
+        zarr_path: Input zarr (output of chunked_harmony). Must have
+            obsm[rep] and varm['PCs'].
+        output_zarr_path: Output zarr path. Defaults to stripping any
+            '_harmony' suffix and appending '_harmony_reconstructed.zarr'.
+            In practice we overwrite the input zarr's X so downstream
+            commands see a standard (X, obs, var, obsm) layout.
+        rep: obsm key holding the corrected PC matrix.
+        chunk_size: Cells per write chunk.
+
+    Returns:
+        Path to the zarr with reconstructed X.
+    """
+    import zarr
+
+    if output_zarr_path is None:
+        output_zarr_path = zarr_path.replace(".zarr", "_reconstructed.zarr")
+
+    print(f"Inverse-PCA reconstruction: {zarr_path} -> {output_zarr_path}")
+    in_store = zarr.open(zarr_path, mode="r")
+
+    if "obsm" not in in_store or rep not in in_store["obsm"]:
+        raise ValueError(f"obsm['{rep}'] missing from {zarr_path}")
+    if "varm" not in in_store or "PCs" not in in_store["varm"]:
+        raise ValueError(
+            f"varm['PCs'] missing from {zarr_path}. "
+            "chunked_harmony() must be called with source_h5ad pointing to "
+            "an h5ad that has PCA loadings."
+        )
+
+    pcs_harmony = np.asarray(in_store["obsm"][rep])   # (n_obs, n_pcs)
+    PCs = np.asarray(in_store["varm"]["PCs"])         # (n_vars, n_pcs)
+    n_obs, n_pcs = pcs_harmony.shape
+    n_vars = PCs.shape[0]
+
+    # Ensure compatible n_pcs
+    if PCs.shape[1] != n_pcs:
+        k = min(PCs.shape[1], n_pcs)
+        print(f"  Truncating to {k} PCs (PCs: {PCs.shape[1]}, harmony: {n_pcs})")
+        pcs_harmony = pcs_harmony[:, :k]
+        PCs = PCs[:, :k]
+
+    print(f"  Reconstructing {n_obs} cells × {n_vars} genes from {PCs.shape[1]} PCs")
+
+    if os.path.exists(output_zarr_path):
+        shutil.rmtree(output_zarr_path)
+    out_store = zarr.open(output_zarr_path, mode="w")
+
+    # Copy everything except X
+    for group_name in ["obs", "var", "obsm", "varm"]:
+        if group_name in in_store:
+            zarr.copy(in_store[group_name], out_store, name=group_name)
+    out_store.attrs.update(dict(in_store.attrs))
+
+    # Create new X and fill it chunk-by-chunk
+    z_X = out_store.create_dataset(
+        "X", shape=(n_obs, n_vars),
+        chunks=(min(chunk_size, n_obs), n_vars),
+        dtype="float32",
+    )
+
+    PCs_T = PCs.T.astype(np.float32)  # (n_pcs, n_vars)
+    for start in range(0, n_obs, chunk_size):
+        end = min(start + chunk_size, n_obs)
+        chunk_pcs = pcs_harmony[start:end].astype(np.float32)
+        z_X[start:end] = chunk_pcs @ PCs_T
+        pct = end / n_obs * 100
+        print(f"    {end}/{n_obs} cells ({pct:.0f}%)", end="\r")
+    print()
+
+    zarr.consolidate_metadata(output_zarr_path)
+
+    size_mb = sum(
+        f.stat().st_size for f in Path(output_zarr_path).rglob("*") if f.is_file()
+    ) / 1e6
+    print(f"  Reconstructed store saved: {output_zarr_path} ({size_mb:.1f} MB)")
+
+    return output_zarr_path
+
+
 def zarr_to_h5ad(zarr_path: str, h5ad_path: str | None = None, chunk_size: int = 5000) -> str:
     """Convert a Zarr store back to h5ad format.
 

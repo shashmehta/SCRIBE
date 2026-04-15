@@ -7,6 +7,7 @@ sub-commands (convert, train, evaluate, plot, run) — just like `git commit` or
 """
 
 import os
+import shutil
 from pathlib import Path
 
 import click
@@ -1055,90 +1056,6 @@ def hk_analysis(data, output, batch_key, condition_col, pval_threshold, log2fc_t
     except Exception as _exc:
         click.echo(f"  Skipping HK heatmap: {_exc}")
 
-    # HK ↔ target-gene relationship preservation plot.
-    # Requires the corrected counterpart of the input to exist. We auto-detect
-    # it by looking for a sibling file with the _corrected suffix; if the user
-    # passed a directory, we fall back to combined_processed_corrected.h5ad in
-    # the same directory.
-    click.echo("\n=== HK ↔ Gene Relationship (before vs after correction) ===")
-    try:
-        import numpy as np
-        import pandas as pd
-        import scipy.sparse as _sp_local
-
-        data_path = Path(data)
-        if data_path.is_dir():
-            corrected_candidate = data_path / "combined_processed_corrected.h5ad"
-        else:
-            corrected_candidate = data_path.with_name(
-                data_path.stem + "_corrected" + data_path.suffix
-            )
-
-        if not corrected_candidate.exists():
-            click.echo(
-                f"  Skipping — corrected counterpart not found at {corrected_candidate}. "
-                "Run `scribe batch-correct` first to generate it."
-            )
-        else:
-            click.echo(f"  Loading corrected counterpart: {corrected_candidate}")
-            adata_corr = sc_lib.read_h5ad(str(corrected_candidate))
-
-            # Align by cell barcode: corrected files may have been re-ordered.
-            # Intersect obs_names to guarantee matching rows.
-            common_cells = adata.obs_names.intersection(adata_corr.obs_names)
-            if len(common_cells) < 10:
-                click.echo(
-                    f"  Skipping — fewer than 10 cells common between uncorrected "
-                    f"({adata.n_obs}) and corrected ({adata_corr.n_obs}) files."
-                )
-            else:
-                adata_u = adata[common_cells].copy()
-                adata_c = adata_corr[common_cells].copy()
-
-                # Pick target genes: top 30 most variable in the uncorrected data,
-                # excluding the HK genes themselves.
-                Xu = adata_u.X
-                if _sp_local.issparse(Xu):
-                    var_per_gene = np.asarray((Xu.power(2)).mean(axis=0)).ravel() - \
-                        np.asarray(Xu.mean(axis=0)).ravel() ** 2
-                else:
-                    var_per_gene = Xu.var(axis=0)
-                var_series = pd.Series(var_per_gene, index=adata_u.var_names)
-                var_series = var_series.drop(labels=[g for g in hk_genes if g in var_series.index])
-                target_genes = var_series.sort_values(ascending=False).head(30).index.tolist()
-
-                # Keep only targets that also exist in the corrected frame
-                target_genes = [g for g in target_genes if g in adata_c.var_names]
-                click.echo(
-                    f"  Using {len(hk_genes)} HK genes × {len(target_genes)} target (top HVG) genes."
-                )
-
-                # Dense submatrices for the union of genes we care about
-                genes_needed = list(dict.fromkeys(list(hk_genes) + target_genes))
-                Xu_sub = adata_u[:, genes_needed].X
-                Xc_sub = adata_c[:, genes_needed].X
-                if _sp_local.issparse(Xu_sub):
-                    Xu_sub = Xu_sub.toarray()
-                if _sp_local.issparse(Xc_sub):
-                    Xc_sub = Xc_sub.toarray()
-
-                uncorr_expr = pd.DataFrame(Xu_sub, columns=genes_needed)
-                corr_expr = pd.DataFrame(Xc_sub, columns=genes_needed)
-                obs_df = adata_u.obs[[batch_key]].reset_index(drop=True)
-
-                hk_rel_path = os.path.join(output, "hk_gene_relationship.png")
-                plotting.plot_hk_gene_relationship(
-                    uncorr_expr=uncorr_expr,
-                    corr_expr=corr_expr,
-                    obs=obs_df,
-                    hk_genes=hk_genes,
-                    target_genes=target_genes,
-                    batch_key=batch_key,
-                    save_path=hk_rel_path,
-                )
-    except Exception as _exc:
-        click.echo(f"  Skipping HK↔gene relationship plot: {_exc}")
-
     click.echo(f"\n=== Housekeeping Gene Analysis Complete ===")
     click.echo(f"Results saved to {output}/")
     click.echo(f"\nKey files to review:")
@@ -1255,51 +1172,113 @@ def convert_zarr(data_path, zarr_path, chunk_size, overwrite):
     help="Cells per processing chunk (default: 5000).",
 )
 @click.option(
+    "--method", type=click.Choice(["combat", "harmony"]), default="combat",
+    help="Batch correction method (default: combat). "
+         "'harmony' runs Harmony on the PCA embedding, then reconstructs "
+         "a gene-level X via inverse-PCA projection (lossy).",
+)
+@click.option(
+    "--source-h5ad", default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to the original h5ad (only needed for --method harmony). "
+         "Supplies varm['PCs'] loadings for inverse-PCA reconstruction. "
+         "Defaults to <zarr_path>.h5ad if that exists.",
+)
+@click.option(
+    "--n-pcs", default=50, type=int,
+    help="Number of PCs to feed into Harmony (default: 50).",
+)
+@click.option(
     "--to-h5ad", is_flag=True, default=False,
     help="Also convert the corrected Zarr store back to h5ad.",
 )
-def correct_zarr(zarr_path, output_path, batch_key, chunk_size, to_h5ad):
+def correct_zarr(
+    zarr_path, output_path, batch_key, chunk_size,
+    method, source_h5ad, n_pcs, to_h5ad,
+):
     """Memory-efficient batch correction on a Zarr store.
 
-    Uses a two-pass streaming algorithm that never loads the full expression
-    matrix into memory:
+    Two methods available:
 
     \b
-      Pass 1: Compute per-batch means and variances (streaming)
-      Pass 2: Apply location-scale correction (chunk-by-chunk)
-
-    This is a location-scale adjustment equivalent to ComBat's core
-    operation, but runs in constant memory (~chunk_size × n_genes).
+      --method combat  (default): Two-pass streaming location-scale
+          correction on the gene expression matrix. Equivalent to ComBat's
+          core operation in constant memory (~chunk_size × n_genes).
+      --method harmony: Runs Harmony on the PCA embedding (small, fits in
+          memory), then reconstructs X via inverse-PCA projection. The
+          reconstructed X is lossy (only captures variance in top-N PCs)
+          but lets Harmony plug into the same KDE / HK-PCA viewers.
 
     Example:
 
     \b
-        # Step 1: Convert h5ad to zarr
-        python run.py convert-zarr --data ./output/processed/combined_processed.h5ad
-
-        # Step 2: Run chunked correction
+        # ComBat
         python run.py correct-zarr --data ./output/processed/combined_processed.zarr
 
-        # Step 3 (optional): Convert back to h5ad
-        python run.py correct-zarr --data ./output/processed/combined_processed.zarr --to-h5ad
+        # Harmony (needs original h5ad for PCA loadings)
+        python run.py correct-zarr --data ./output/processed/combined_processed.zarr \\
+            --method harmony \\
+            --source-h5ad ./output/processed/combined_processed.h5ad \\
+            --to-h5ad
     """
     from scribe.monitor import ResourceMonitor
 
-    click.echo("\n=== Chunked Batch Correction (Memory-Efficient) ===")
+    if method == "combat":
+        click.echo("\n=== Chunked ComBat Correction (Memory-Efficient) ===")
 
-    with ResourceMonitor(interval=2.0) as mon:
-        corrected_path = zarr_utils.chunked_combat(
-            zarr_path,
-            batch_key=batch_key,
-            chunk_size=chunk_size,
-            output_zarr_path=output_path,
-        )
+        with ResourceMonitor(interval=2.0) as mon:
+            corrected_path = zarr_utils.chunked_combat(
+                zarr_path,
+                batch_key=batch_key,
+                chunk_size=chunk_size,
+                output_zarr_path=output_path,
+            )
+            click.echo("\n--- Resource Usage ---")
+            click.echo(f"Peak RSS: {mon.stats.peak_rss_mb:.1f} MB")
 
-        click.echo(f"\n--- Resource Usage ---")
-        click.echo(f"Peak RSS: {mon.stats.peak_rss_mb:.1f} MB")
+    else:  # harmony
+        click.echo("\n=== Chunked Harmony Correction (Memory-Efficient) ===")
+
+        # Infer source h5ad if not given
+        if source_h5ad is None:
+            candidate = zarr_path.replace(".zarr", ".h5ad")
+            if os.path.exists(candidate):
+                source_h5ad = candidate
+                click.echo(f"  Using source h5ad: {source_h5ad}")
+
+        # Harmony output path defaults to <input>_harmony.zarr
+        harmony_path = output_path
+        if harmony_path is None:
+            harmony_path = zarr_path.replace(".zarr", "_harmony.zarr")
+
+        with ResourceMonitor(interval=2.0) as mon:
+            # Stage 1: run Harmony on PCA embedding
+            harmony_raw_path = harmony_path.replace(".zarr", "_raw.zarr")
+            zarr_utils.chunked_harmony(
+                zarr_path,
+                batch_key=batch_key,
+                n_pcs=n_pcs,
+                source_h5ad=source_h5ad,
+                output_zarr_path=harmony_raw_path,
+            )
+
+            # Stage 2: inverse-PCA project corrected PCs back to gene space
+            corrected_path = zarr_utils.chunked_inverse_pca(
+                harmony_raw_path,
+                output_zarr_path=harmony_path,
+                rep="X_pca_harmony",
+                chunk_size=chunk_size,
+            )
+
+            # Clean up intermediate
+            if os.path.exists(harmony_raw_path):
+                shutil.rmtree(harmony_raw_path)
+
+            click.echo("\n--- Resource Usage ---")
+            click.echo(f"Peak RSS: {mon.stats.peak_rss_mb:.1f} MB")
 
     if to_h5ad:
-        click.echo("\n=== Converting Corrected Zarr -> h5ad ===")
+        click.echo(f"\n=== Converting {method.title()} Zarr -> h5ad ===")
         h5ad_path = zarr_utils.zarr_to_h5ad(corrected_path, chunk_size=chunk_size)
         click.echo(f"  h5ad: {h5ad_path}")
 
