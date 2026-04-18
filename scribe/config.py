@@ -137,7 +137,8 @@ class BatchConfig:
 class PipelineConfig:
     """Everything needed to run the train → evaluate → plot pipeline."""
     data: str                    # path to the processed .h5ad file
-    output: str = "./output"     # where to write the model, plots, and results
+    output: str = "./output/processed"  # where to write the model artifact
+    plots_dir: str = "./output/plots"   # where to write all plot PNGs
     condition_col: str = "CONDITION"  # obs column that holds the class labels
     batch_key: str = "dataset"   # obs column identifying the source dataset (for batch correction)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -237,7 +238,8 @@ def load_pipeline_config(path: str) -> PipelineConfig:
 
     return PipelineConfig(
         data=raw["data"],
-        output=raw.get("output", "./output"),
+        output=raw.get("output", "./output/processed"),
+        plots_dir=raw.get("plots_dir", "./output/plots"),
         condition_col=raw.get("condition_col", "CONDITION"),
         batch_key=raw.get("batch_key", "dataset"),
         model=model,

@@ -78,6 +78,11 @@ def extract_features_and_labels(
 ) -> tuple[np.ndarray, np.ndarray, LabelEncoder, list[str]]:
     """Extract dense expression matrix and encoded condition labels.
 
+    Prefers the ``layers["X_norm"]`` z-scored matrix (mean 0, unit variance,
+    clipped at ±10) for classifier training — that's what the model was
+    validated against. Falls back to ``adata.X`` only for legacy h5ads that
+    predate the layer scheme.
+
     Args:
         adata: The loaded AnnData object.
         condition_col: Name of the obs column containing condition labels.
@@ -89,11 +94,19 @@ def extract_features_and_labels(
         - label_encoder: Fitted LabelEncoder for decoding predictions.
         - gene_names: List of gene names matching X columns.
     """
-    # Convert sparse matrix to dense if needed — ML models need plain arrays
-    if scipy.sparse.issparse(adata.X):
-        X = adata.X.toarray()
+    # Prefer the z-scored layer; fall back to X for legacy files
+    if "X_norm" in adata.layers:
+        source = adata.layers["X_norm"]
+        print("  Feature matrix: layers['X_norm'] (z-scored)")
     else:
-        X = np.array(adata.X)
+        source = adata.X
+        print("  Feature matrix: adata.X (no X_norm layer found)")
+
+    # Convert sparse matrix to dense if needed — ML models need plain arrays
+    if scipy.sparse.issparse(source):
+        X = source.toarray()
+    else:
+        X = np.array(source)
 
     # Encode condition labels as numbers (e.g., 'Normal'->0, 'Tumor'->1)
     le = LabelEncoder()
@@ -263,16 +276,30 @@ def merge_datasets(
         f"({len(hk_in_data)} housekeeping genes force-included: {hk_in_data})"
     )
 
-    # Subset to selected genes — now small enough for PCA/scale (~3,000 genes)
+    # Subset to selected genes — now small enough to densify (~3,000 genes)
     combined = combined[:, combined.var["highly_variable"]].copy()
 
-    # Save unscaled data in .raw for batch diagnostics (housekeeping gene analysis)
-    combined.raw = combined.copy()
+    # X stays as log1p (canonical representation). Densify the HVG-sized matrix
+    # so downstream scaling / PCA don't have to special-case sparse vs dense.
+    if scipy.sparse.issparse(combined.X):
+        combined.X = combined.X.toarray()
 
-    # Scale and compute embeddings
-    print("\nScaling combined data and computing joint embeddings...")
-    sc.pp.scale(combined, max_value=10)
-    sc.tl.pca(combined)
+    # Per-gene scaling params, saved so Harmony's inverse-PCA step can invert
+    # the z-scoring back to log1p space later.
+    gene_mean = np.asarray(combined.X.mean(axis=0)).ravel()
+    gene_std = np.asarray(combined.X.std(axis=0)).ravel()
+    gene_std[gene_std == 0] = 1.0
+    combined.var["gene_mean"] = gene_mean
+    combined.var["gene_std"] = gene_std
+
+    # X_norm layer: z-scored log1p, clipped at ±10. This is what PCA and the
+    # classifier consume; X itself remains log1p for gene-level plots.
+    X_norm = (combined.X - gene_mean) / gene_std
+    np.clip(X_norm, -10, 10, out=X_norm)
+    combined.layers["X_norm"] = X_norm.astype(np.float32)
+
+    print("\nComputing joint embeddings (PCA on layers['X_norm'])...")
+    sc.pp.pca(combined, layer="X_norm", n_comps=50)
 
     # ── Optional Harmony batch correction ──────────────────────────────────────
     if harmony_correct:

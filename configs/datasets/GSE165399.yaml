@@ -8,7 +8,7 @@ description: >
 
 source:
   type: local
-  base_path: "/Users/shash/Library/CloudStorage/GoogleDrive-shashvatsmehta@gmail.com/.shortcut-targets-by-id/1m6XoSPhIWcxsfR8TAwcwAbQMXWcFQw6l/ShashvatHighSchoolCollege/2025ResearchExternship/Datasets"
+  base_path: "./output"
 
 # TAR contains per-sample TXT DGE matrices named by GSM accession.
 # Loader extracts the TAR, reads each TXT file, and concatenates into one AnnData.

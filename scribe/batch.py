@@ -126,16 +126,33 @@ def correct_batch_combat(
     gene expression and removes them while preserving biological variation.
 
     Args:
-        adata: AnnData with expression data and batch annotations.
+        adata: AnnData with log1p expression in X and batch annotations.
         batch_key: Obs column identifying the batch.
 
     Returns:
-        Copy of adata with batch-corrected expression in X.
+        Copy of adata with batch-corrected log1p expression in X,
+        matching layers["X_norm"] (z-scored), refreshed var[gene_mean/std],
+        and recomputed PCA / neighbors / UMAP / leiden.
     """
     corrected = adata.copy()
+    # ComBat operates in log-space; input X is log1p, output X stays log-space
+    # (may go slightly negative — that's expected from the linear correction).
     sc.pp.combat(corrected, key=batch_key)
-    # Recompute embeddings on corrected data
-    sc.tl.pca(corrected)
+
+    # Rebuild scaling params + X_norm layer from corrected X so downstream
+    # consumers (PCA, classifier) stay self-consistent.
+    X = np.asarray(corrected.X)
+    gene_mean = X.mean(axis=0)
+    gene_std = X.std(axis=0)
+    gene_std[gene_std == 0] = 1.0
+    corrected.var["gene_mean"] = gene_mean
+    corrected.var["gene_std"] = gene_std
+    X_norm = (X - gene_mean) / gene_std
+    np.clip(X_norm, -10, 10, out=X_norm)
+    corrected.layers["X_norm"] = X_norm.astype(np.float32)
+
+    # Recompute embeddings on the corrected X_norm layer
+    sc.pp.pca(corrected, layer="X_norm", n_comps=50)
     sc.pp.neighbors(corrected, n_pcs=30)
     sc.tl.umap(corrected)
     sc.tl.leiden(corrected, resolution=0.5)
@@ -147,22 +164,28 @@ def correct_batch_harmony(
     batch_key: str = "dataset",
     n_pcs: int = 30,
 ) -> anndata.AnnData:
-    """Apply Harmony batch correction on PCA embeddings.
+    """Apply Harmony batch correction and reconstruct gene-level expression.
 
-    Harmony iteratively adjusts PCA coordinates to remove batch effects
-    while preserving biological variation. Operates in PCA space rather
-    than on raw expression, so it's faster and often more robust.
+    Harmony iteratively adjusts PCA coordinates to remove batch effects.
+    Native Harmony only touches the PCA embedding, so we additionally project
+    the corrected PCs back to gene space (lossy truncated reconstruction)
+    so downstream gene-level analyses (LFC, volcano) see the correction too.
 
     Requires the `harmonypy` package (pip install harmonypy).
 
     Args:
-        adata: AnnData with pre-computed PCA.
+        adata: AnnData with log1p X, layers["X_norm"], var["gene_mean"] /
+            var["gene_std"], and pre-computed PCA loadings in varm["PCs"].
         batch_key: Obs column identifying the batch.
         n_pcs: Number of PCs to use.
 
     Returns:
-        Copy of adata with corrected PCA in obsm['X_pca_harmony']
-        and recomputed neighbors/UMAP/Leiden.
+        Copy of adata with:
+          - X replaced by log1p-space reconstruction of the corrected data
+          - layers["X_norm"] = corresponding z-scored reconstruction
+          - obsm["X_pca_harmony"] = corrected PC embedding
+          - refreshed var["gene_mean"] / var["gene_std"]
+          - recomputed neighbors/UMAP/Leiden on the corrected PCs
     """
     try:
         import harmonypy
@@ -174,9 +197,10 @@ def correct_batch_harmony(
 
     corrected = adata.copy()
 
-    # Ensure PCA is computed
-    if "X_pca" not in corrected.obsm:
-        sc.tl.pca(corrected, n_comps=n_pcs)
+    # Ensure PCA loadings are available (need varm["PCs"] for inverse projection)
+    if "X_pca" not in corrected.obsm or "PCs" not in corrected.varm:
+        layer = "X_norm" if "X_norm" in corrected.layers else None
+        sc.pp.pca(corrected, layer=layer, n_comps=n_pcs)
 
     # Run Harmony on the PCA embedding
     harmony_out = harmonypy.run_harmony(
@@ -186,12 +210,30 @@ def correct_batch_harmony(
     )
     # Z_corr may be (n_pcs, n_cells) or (n_cells, n_pcs) depending on version
     Z = harmony_out.Z_corr
-    if hasattr(Z, 'numpy'):
+    if hasattr(Z, "numpy"):
         Z = Z.numpy()  # convert from torch tensor if needed
     Z = np.array(Z)
     if Z.shape[0] == n_pcs and Z.shape[1] == corrected.n_obs:
         Z = Z.T  # transpose to (n_cells, n_pcs)
     corrected.obsm["X_pca_harmony"] = Z
+
+    # ── Inverse-PCA: reconstruct gene expression from corrected PCs ──
+    # PCs were fit on the z-scored X_norm layer, so Z @ PCs.T is in z-score space.
+    # Inverting the scaling (× std + mean) yields a log1p-space reconstruction.
+    PCs = corrected.varm["PCs"][:, :n_pcs]              # (n_vars, n_pcs)
+    X_norm_hat = (Z @ PCs.T).astype(np.float32)         # (n_obs, n_vars), z-scored
+    mean = corrected.var["gene_mean"].values.astype(np.float32)
+    std = corrected.var["gene_std"].values.astype(np.float32)
+    X_log1p_hat = (X_norm_hat * std + mean).astype(np.float32)
+
+    corrected.X = X_log1p_hat
+    corrected.layers["X_norm"] = X_norm_hat
+    # Refresh gene_mean/std on the reconstruction so the invariant stays self-consistent
+    new_mean = corrected.X.mean(axis=0)
+    new_std = corrected.X.std(axis=0)
+    new_std[new_std == 0] = 1.0
+    corrected.var["gene_mean"] = new_mean
+    corrected.var["gene_std"] = new_std
 
     # Recompute neighbors/UMAP/Leiden using the corrected PCA
     sc.pp.neighbors(corrected, use_rep="X_pca_harmony")
