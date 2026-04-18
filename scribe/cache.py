@@ -200,10 +200,12 @@ def build_cache(force: bool = False) -> None:
     adata = sc.read_h5ad(str(combat_path))
 
     # zarr_to_h5ad copies obsm verbatim from uncorrected store, so embeddings
-    # reflect *uncorrected* geometry. Recompute on the corrected X so the
-    # "before vs after" view shows two different embeddings.
+    # reflect *uncorrected* geometry. Recompute on the corrected data so the
+    # "before vs after" view shows two different embeddings. PCA runs on the
+    # z-scored layer (X itself is log1p under the new contract).
     print("  Recomputing PCA / neighbors / UMAP / leiden on ComBat data...")
-    sc.pp.pca(adata, n_comps=50)
+    pca_layer = "X_norm" if "X_norm" in adata.layers else None
+    sc.pp.pca(adata, layer=pca_layer, n_comps=50)
     sc.pp.neighbors(adata)
     sc.tl.umap(adata)
     sc.tl.leiden(adata, flavor="igraph", n_iterations=2, directed=False)
@@ -240,7 +242,8 @@ def build_cache(force: bool = False) -> None:
             sc.pp.neighbors(adata, use_rep="X_pca_harmony")
         else:
             print("  WARNING: X_pca_harmony not in obsm; falling back to X_pca")
-            sc.pp.pca(adata, n_comps=50)
+            pca_layer = "X_norm" if "X_norm" in adata.layers else None
+            sc.pp.pca(adata, layer=pca_layer, n_comps=50)
             sc.pp.neighbors(adata)
         sc.tl.umap(adata)
         sc.tl.leiden(adata, flavor="igraph", n_iterations=2, directed=False)

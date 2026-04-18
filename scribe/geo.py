@@ -88,8 +88,12 @@ def load_10x_mtx(src_dir: str, name_prefix: str = "") -> ad.AnnData:
         tmpdir = tempfile.mkdtemp(prefix="10x_mtx_")
         try:
             standard_names = ["barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz"]
+            # Resolve the source directory to an absolute path so symlinks
+            # placed in tmpdir don't try to resolve a relative target from
+            # tmpdir's location.
+            abs_src_dir = os.path.abspath(src_dir)
             for std_name in standard_names:
-                src = os.path.join(src_dir, name_prefix + std_name)
+                src = os.path.join(abs_src_dir, name_prefix + std_name)
                 dst = os.path.join(tmpdir, std_name)
                 if os.path.exists(src):
                     # symlink = a pointer to the original file, not a copy

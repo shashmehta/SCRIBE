@@ -5,8 +5,11 @@
 # Update this to point at the dataset you want to classify.
 data: "./output/GSE154778_processed.h5ad"
 
-# Directory where model artifacts, plots, and results are written.
-output: "./output"
+# Directory where the model artifact (.joblib) is written.
+output: "./output/processed"
+
+# Directory where all plot PNGs are written.
+plots_dir: "./output/plots"
 
 # Name of the obs column that holds condition labels (e.g. "primary", "metastatic").
 condition_col: "condition"

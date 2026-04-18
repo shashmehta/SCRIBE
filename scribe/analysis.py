@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import scipy.sparse
+import scanpy as sc
 import anndata
 
 
@@ -61,6 +62,36 @@ def compute_expression_ratio(
     return num / denom  # Ratio > 1 means higher in normal; ratio < 1 means higher in tumor
 
 
+def compute_log_fold_change(
+    avg_by_condition: dict[str, pd.Series],
+    numerator: str,
+    denominator: str,
+    is_log_space: bool = True,
+    epsilon: float = 1e-9,
+) -> pd.Series:
+    """Compute signed log fold change between two conditions for each gene.
+
+    If ``is_log_space`` is True (data already log1p-normalized), LFC is the
+    difference of means. Otherwise it's log2 of the ratio of means with a
+    small pseudocount.
+
+    Args:
+        avg_by_condition: Dict from avg_expression_by_condition().
+        numerator: Condition label treated as the numerator (e.g. 'malignant').
+        denominator: Condition label treated as the denominator (e.g. 'normal').
+        is_log_space: Whether mean values are already in log space.
+        epsilon: Pseudocount for non-log inputs.
+
+    Returns:
+        pd.Series of signed log fold change values, indexed by gene.
+    """
+    num = avg_by_condition[numerator]
+    denom = avg_by_condition[denominator]
+    if is_log_space:
+        return num - denom
+    return np.log2((num + epsilon) / (denom + epsilon))
+
+
 def top_differential_genes(
     ratio: pd.Series,
     top_n: int = 10,
@@ -88,3 +119,51 @@ def top_differential_genes(
     print(top_denominator.to_string())
 
     return top_numerator, top_denominator
+
+
+def compute_differential_expression(
+    adata: anndata.AnnData,
+    group_key: str,
+    group_a: str,
+    group_b: str,
+    method: str = "wilcoxon",
+) -> pd.DataFrame:
+    """Per-gene DE between two groups via scanpy's rank_genes_groups.
+
+    Runs ``sc.tl.rank_genes_groups`` with ``group_a`` as the tested group and
+    ``group_b`` as the single reference. LFC sign convention: positive means
+    up in ``group_a``.
+
+    Args:
+        adata: AnnData with log1p-normalized expression in ``X``.
+        group_key: Column in ``obs`` holding group labels.
+        group_a: Label used as the tested group (volcano x>0 side).
+        group_b: Label used as the single reference group.
+        method: DE method passed through to scanpy (default: 'wilcoxon').
+
+    Returns:
+        DataFrame with columns: gene, logfoldchange, pvalue, pvalue_adj,
+        neg_log10_pvalue_adj. Rows = all genes in adata.var_names.
+    """
+    mask = adata.obs[group_key].isin([group_a, group_b])
+    sub = adata[mask].copy()
+    sub.obs[group_key] = sub.obs[group_key].astype(str)
+
+    n_a = int((sub.obs[group_key] == group_a).sum())
+    n_b = int((sub.obs[group_key] == group_b).sum())
+    print(f"  DE {group_a} (n={n_a}) vs {group_b} (n={n_b}) via {method}")
+
+    sc.tl.rank_genes_groups(
+        sub, groupby=group_key, groups=[group_a], reference=group_b,
+        method=method, use_raw=False,
+    )
+    res = sub.uns["rank_genes_groups"]
+
+    df = pd.DataFrame({
+        "gene": [g[0] for g in res["names"]],
+        "logfoldchange": [v[0] for v in res["logfoldchanges"]],
+        "pvalue": [v[0] for v in res["pvals"]],
+        "pvalue_adj": [v[0] for v in res["pvals_adj"]],
+    })
+    df["neg_log10_pvalue_adj"] = -np.log10(df["pvalue_adj"].clip(lower=1e-300))
+    return df

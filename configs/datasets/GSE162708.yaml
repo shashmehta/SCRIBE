@@ -8,7 +8,7 @@ description: >
 
 source:
   type: local
-  base_path: "/Users/shash/Library/CloudStorage/GoogleDrive-shashvatsmehta@gmail.com/.shortcut-targets-by-id/1m6XoSPhIWcxsfR8TAwcwAbQMXWcFQw6l/ShashvatHighSchoolCollege/2025ResearchExternship/Datasets"
+  base_path: "./output"
 
 # The three GSE-prefixed files are symlinked to a temp directory under standard
 # 10x names (barcodes.tsv.gz, features.tsv.gz, matrix.mtx.gz) before loading.

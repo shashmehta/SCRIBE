@@ -359,7 +359,7 @@ def chunked_combat(
         batch_stats[b]["n"] = n
         print(f"    {b}: {n} cells, mean RSS {mean.mean():.3f}")
 
-    # ── Pass 2: Apply location-scale correction and write to output ──────
+    # ── Pass 2: Apply location-scale correction; accumulate stats for X_norm ──
     print("  Pass 2: Applying correction and writing output...")
 
     if os.path.exists(output_zarr_path):
@@ -370,6 +370,11 @@ def chunked_combat(
         chunks=(min(chunk_size, n_obs), n_vars),
         dtype="float32",
     )
+
+    # Running sums on the CORRECTED X, so we can derive gene_mean / gene_std
+    # without a second full pass.
+    corrected_sum = np.zeros(n_vars, dtype=np.float64)
+    corrected_sum_sq = np.zeros(n_vars, dtype=np.float64)
 
     for start, end, X_chunk in chunk_iterator(zdata, chunk_size):
         chunk_batches = batch_labels[start:end]
@@ -386,15 +391,50 @@ def chunked_combat(
             corrected_chunk[mask] = corrected.astype(np.float32)
 
         z_X_out[start:end] = corrected_chunk
+        corrected_sum += corrected_chunk.astype(np.float64).sum(axis=0)
+        corrected_sum_sq += (corrected_chunk.astype(np.float64) ** 2).sum(axis=0)
+
         pct = end / n_obs * 100
         print(f"    {end}/{n_obs} cells ({pct:.0f}%)", end="\r")
     print()
+
+    # Derive per-gene mean/std on the corrected X
+    corrected_mean = corrected_sum / n_obs
+    corrected_var = (corrected_sum_sq / n_obs) - (corrected_mean ** 2)
+    corrected_std = np.sqrt(np.maximum(corrected_var, 1e-8))
+    corrected_std[corrected_std == 0] = 1.0
 
     # Copy obs, var, obsm from input store
     in_store = zarr.open(zarr_path, mode="r")
     for group_name in ["obs", "var", "obsm"]:
         if group_name in in_store:
             zarr.copy(in_store[group_name], out_store, name=group_name)
+
+    # Overwrite gene_mean / gene_std with values computed from the corrected X
+    var_out = out_store["var"]
+    for col in ("gene_mean", "gene_std"):
+        if col in var_out:
+            del var_out[col]
+    var_out.create_dataset("gene_mean", data=corrected_mean.astype(np.float32))
+    var_out.create_dataset("gene_std", data=corrected_std.astype(np.float32))
+
+    # ── Pass 3: Write layers/X_norm chunkwise (z-scored corrected X) ─────
+    print("  Pass 3: Writing layers/X_norm (z-scored corrected expression)...")
+    layers_grp = out_store.create_group("layers")
+    z_X_norm = layers_grp.create_dataset(
+        "X_norm", shape=(n_obs, n_vars),
+        chunks=(min(chunk_size, n_obs), n_vars),
+        dtype="float32",
+    )
+    for start in range(0, n_obs, chunk_size):
+        end = min(start + chunk_size, n_obs)
+        chunk = np.array(z_X_out[start:end], dtype=np.float32)
+        x_norm = (chunk - corrected_mean.astype(np.float32)) / corrected_std.astype(np.float32)
+        np.clip(x_norm, -10, 10, out=x_norm)
+        z_X_norm[start:end] = x_norm
+        pct = end / n_obs * 100
+        print(f"    {end}/{n_obs} cells ({pct:.0f}%)", end="\r")
+    print()
 
     out_store.attrs.update(dict(in_store.attrs))
     zarr.consolidate_metadata(output_zarr_path)
@@ -504,8 +544,11 @@ def chunked_harmony(
         if group_name in in_store:
             zarr.copy(in_store[group_name], out_store, name=group_name)
 
-    # Add X_pca_harmony
+    # Add X_pca_harmony (overwrite any pre-existing copy from the source store —
+    # merge_datasets runs an inline Harmony step that already populates this).
     obsm_out = out_store["obsm"]
+    if "X_pca_harmony" in obsm_out:
+        del obsm_out["X_pca_harmony"]
     obsm_out.create_dataset(
         "X_pca_harmony", data=Z,
         chunks=(min(5000, n_obs), n_pcs),
@@ -546,26 +589,27 @@ def chunked_inverse_pca(
 ) -> str:
     """Reconstruct an approximate gene-expression matrix from a PC embedding.
 
-    After Harmony corrects PC coordinates, we project them back to gene
-    space so the KDE and HK-PCA viewers can treat Harmony as a peer of
-    ComBat. This is a **lossy truncated reconstruction** — only variance
-    captured by the top-n_pcs PCs is recovered.
+    After Harmony corrects PC coordinates, project them back to gene space so
+    Harmony becomes a peer of ComBat for gene-level analyses (LFC, volcano).
+    This is a **lossy truncated reconstruction** — only variance captured by
+    the top-n_pcs PCs is recovered.
 
-    Formula (X already centered/scaled by sc.pp.scale):
-        X_hat = X_pca_harmony @ PCs.T
+    Assumes PCs were fit on the z-scored X_norm layer (per the new
+    preprocessing contract), so:
+        X_norm_hat = X_pca_harmony @ PCs.T         # z-scored
+        X_log1p_hat = X_norm_hat * gene_std + gene_mean    # log1p space
+
+    The output zarr holds X in log1p space and layers/X_norm in z-score space.
 
     Args:
         zarr_path: Input zarr (output of chunked_harmony). Must have
-            obsm[rep] and varm['PCs'].
-        output_zarr_path: Output zarr path. Defaults to stripping any
-            '_harmony' suffix and appending '_harmony_reconstructed.zarr'.
-            In practice we overwrite the input zarr's X so downstream
-            commands see a standard (X, obs, var, obsm) layout.
+            obsm[rep], varm['PCs'], var['gene_mean'], var['gene_std'].
+        output_zarr_path: Output zarr path. Defaults to <input>_reconstructed.zarr.
         rep: obsm key holding the corrected PC matrix.
         chunk_size: Cells per write chunk.
 
     Returns:
-        Path to the zarr with reconstructed X.
+        Path to the zarr with reconstructed X (log1p) and layers['X_norm'].
     """
     import zarr
 
@@ -583,9 +627,18 @@ def chunked_inverse_pca(
             "chunked_harmony() must be called with source_h5ad pointing to "
             "an h5ad that has PCA loadings."
         )
+    if "var" not in in_store or "gene_mean" not in in_store["var"] or "gene_std" not in in_store["var"]:
+        raise ValueError(
+            f"var['gene_mean'] / var['gene_std'] missing from {zarr_path}. "
+            "The source h5ad must be produced by the new merge_datasets() "
+            "which writes these scaling params so inverse-PCA can invert "
+            "back to log1p space."
+        )
 
     pcs_harmony = np.asarray(in_store["obsm"][rep])   # (n_obs, n_pcs)
     PCs = np.asarray(in_store["varm"]["PCs"])         # (n_vars, n_pcs)
+    gene_mean = np.asarray(in_store["var"]["gene_mean"], dtype=np.float32)
+    gene_std = np.asarray(in_store["var"]["gene_std"], dtype=np.float32)
     n_obs, n_pcs = pcs_harmony.shape
     n_vars = PCs.shape[0]
 
@@ -602,27 +655,56 @@ def chunked_inverse_pca(
         shutil.rmtree(output_zarr_path)
     out_store = zarr.open(output_zarr_path, mode="w")
 
-    # Copy everything except X
+    # Copy everything except X (layers will be newly written below)
     for group_name in ["obs", "var", "obsm", "varm"]:
         if group_name in in_store:
             zarr.copy(in_store[group_name], out_store, name=group_name)
     out_store.attrs.update(dict(in_store.attrs))
 
-    # Create new X and fill it chunk-by-chunk
+    # Create new X (log1p-reconstructed) and layers/X_norm (z-scored reconstruction)
     z_X = out_store.create_dataset(
         "X", shape=(n_obs, n_vars),
         chunks=(min(chunk_size, n_obs), n_vars),
         dtype="float32",
     )
+    layers_grp = out_store.create_group("layers")
+    z_X_norm = layers_grp.create_dataset(
+        "X_norm", shape=(n_obs, n_vars),
+        chunks=(min(chunk_size, n_obs), n_vars),
+        dtype="float32",
+    )
+
+    # Running sums for refreshed gene_mean/gene_std on the log1p reconstruction
+    recon_sum = np.zeros(n_vars, dtype=np.float64)
+    recon_sum_sq = np.zeros(n_vars, dtype=np.float64)
 
     PCs_T = PCs.T.astype(np.float32)  # (n_pcs, n_vars)
     for start in range(0, n_obs, chunk_size):
         end = min(start + chunk_size, n_obs)
         chunk_pcs = pcs_harmony[start:end].astype(np.float32)
-        z_X[start:end] = chunk_pcs @ PCs_T
+        x_norm = chunk_pcs @ PCs_T                              # (chunk, n_vars), z-scored
+        x_log1p = (x_norm * gene_std + gene_mean).astype(np.float32)
+
+        z_X_norm[start:end] = x_norm
+        z_X[start:end] = x_log1p
+        recon_sum += x_log1p.astype(np.float64).sum(axis=0)
+        recon_sum_sq += (x_log1p.astype(np.float64) ** 2).sum(axis=0)
+
         pct = end / n_obs * 100
         print(f"    {end}/{n_obs} cells ({pct:.0f}%)", end="\r")
     print()
+
+    # Refresh gene_mean / gene_std on the reconstruction so the invariant holds
+    recon_mean = recon_sum / n_obs
+    recon_var = (recon_sum_sq / n_obs) - (recon_mean ** 2)
+    recon_std = np.sqrt(np.maximum(recon_var, 1e-8))
+    recon_std[recon_std == 0] = 1.0
+    var_out = out_store["var"]
+    for col in ("gene_mean", "gene_std"):
+        if col in var_out:
+            del var_out[col]
+    var_out.create_dataset("gene_mean", data=recon_mean.astype(np.float32))
+    var_out.create_dataset("gene_std", data=recon_std.astype(np.float32))
 
     zarr.consolidate_metadata(output_zarr_path)
 
@@ -638,7 +720,8 @@ def zarr_to_h5ad(zarr_path: str, h5ad_path: str | None = None, chunk_size: int =
     """Convert a Zarr store back to h5ad format.
 
     Reads the Zarr store chunk by chunk and assembles an AnnData object,
-    then writes it as h5ad.
+    preserving obs/var columns, obsm embeddings, varm loadings, and
+    layers (e.g. X_norm). Writes the result as h5ad.
 
     Args:
         zarr_path: Path to the .zarr store.
@@ -649,38 +732,72 @@ def zarr_to_h5ad(zarr_path: str, h5ad_path: str | None = None, chunk_size: int =
         Path to the written .h5ad file.
     """
     import pandas as pd
+    import zarr
 
     if h5ad_path is None:
         h5ad_path = zarr_path.replace(".zarr", ".h5ad")
 
     print(f"Converting {zarr_path} -> {h5ad_path}")
     zdata = load_zarr_backed(zarr_path)
+    store = zarr.open(zarr_path, mode="r")
     n_obs = zdata["n_obs"]
     n_vars = zdata["n_vars"]
 
-    # Read X in chunks and build a sparse matrix to save memory
-    from scipy.sparse import vstack, csr_matrix
-
-    chunks = []
+    # Read X in chunks and build a dense float32 matrix. ComBat/Harmony outputs
+    # are dense and may contain negatives, so csr_matrix would lose density
+    # and/or precision; staying dense is safer here.
+    X = np.empty((n_obs, n_vars), dtype=np.float32)
     for start, end, X_chunk in chunk_iterator(zdata, chunk_size):
-        chunks.append(csr_matrix(X_chunk))
+        X[start:end] = np.asarray(X_chunk, dtype=np.float32)
         pct = end / n_obs * 100
-        print(f"  Reading: {end}/{n_obs} ({pct:.0f}%)", end="\r")
+        print(f"  Reading X: {end}/{n_obs} ({pct:.0f}%)", end="\r")
     print()
-
-    X_sparse = vstack(chunks, format="csr")
 
     obs = pd.DataFrame(zdata["obs"])
     if "obs_names" in zdata:
         obs.index = zdata["obs_names"]
 
-    var = pd.DataFrame(index=zdata.get("var_names", np.arange(n_vars)))
+    # Rebuild var from all numeric + categorical columns on disk (not just the index)
+    var_data: dict = {}
+    if "var" in store:
+        var_group = store["var"]
+        for key in var_group:
+            if key == "_index":
+                continue
+            item = var_group[key]
+            if hasattr(item, "attrs") and item.attrs.get("dtype") == "categorical":
+                codes = np.array(item["codes"])
+                cats = np.array(item["categories"])
+                var_data[key] = cats[codes]
+            elif hasattr(item, "shape"):
+                var_data[key] = np.array(item)
+    var_index = zdata.get("var_names", np.arange(n_vars))
+    var = pd.DataFrame(var_data, index=var_index) if var_data else pd.DataFrame(index=var_index)
 
-    adata = anndata.AnnData(X=X_sparse, obs=obs, var=var)
+    adata = anndata.AnnData(X=X, obs=obs, var=var)
 
     # Restore obsm embeddings
     for key, arr in zdata["obsm"].items():
         adata.obsm[key] = np.array(arr)
+
+    # Restore varm (e.g. PCs)
+    if "varm" in store:
+        for key in store["varm"]:
+            adata.varm[key] = np.asarray(store["varm"][key])
+
+    # Restore layers (e.g. X_norm)
+    if "layers" in store:
+        for key in store["layers"]:
+            item = store["layers"][key]
+            if hasattr(item, "shape") and item.shape == (n_obs, n_vars):
+                layer = np.empty((n_obs, n_vars), dtype=np.float32)
+                for start in range(0, n_obs, chunk_size):
+                    end = min(start + chunk_size, n_obs)
+                    layer[start:end] = np.asarray(item[start:end], dtype=np.float32)
+                    pct = end / n_obs * 100
+                    print(f"  Reading layers/{key}: {end}/{n_obs} ({pct:.0f}%)", end="\r")
+                print()
+                adata.layers[key] = layer
 
     adata.write_h5ad(h5ad_path)
     size_mb = os.path.getsize(h5ad_path) / 1e6

@@ -290,24 +290,24 @@ def evaluate(config, model_path, data_path):
     help="Path to a saved model_artifact.joblib.",
 )
 @click.option(
-    "--output",
+    "--plots-dir", "plots_dir",
     type=click.Path(file_okay=False),
     default=None,
-    help="Output directory. Overrides config value.",
+    help="Directory for plot PNGs. Overrides config value.",
 )
-def plot(config, model_path, output):
+def plot(config, model_path, plots_dir):
     """Generate UMAP and feature-importance plots.
 
     Reads UMAP embedding from the .h5ad and feature importances from the
-    model artifact, then writes PNG files to <output>/plots/.
+    model artifact, then writes PNG files to the plots directory.
 
     Example:
 
         python run.py plot --config configs/pipeline.yaml \\
-            --model ./output/model_artifact.joblib
+            --model ./output/processed/model_artifact.joblib
     """
     cfg = load_pipeline_config(config)
-    out_dir = output or cfg.output
+    plots_out = plots_dir or cfg.plots_dir
 
     click.echo("\n=== Loading Data ===")
     adata = celldata.load_adata(cfg.data, condition_col=cfg.condition_col)
@@ -322,9 +322,8 @@ def plot(config, model_path, output):
     )
 
     click.echo("\n=== Generating Plots ===")
-    # Save UMAP scatter plots and a feature-importance bar chart to <output>/plots/
     plotting.generate_all_plots(
-        adata, importances, out_dir,
+        adata, importances, plots_out,
         umap_color_columns=cfg.plots.umap_columns,
         umap_genes=cfg.plots.umap_genes,
     )
@@ -353,9 +352,15 @@ def plot(config, model_path, output):
     "--output",
     type=click.Path(file_okay=False),
     default=None,
-    help="Output directory. Overrides config value.",
+    help="Directory for the model artifact. Overrides config value.",
 )
-def run_pipeline(config, retrain, data_path, output):
+@click.option(
+    "--plots-dir", "plots_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Directory for plot PNGs. Overrides config value.",
+)
+def run_pipeline(config, retrain, data_path, output, plots_dir):
     """Full pipeline: train → evaluate → plot.
 
     Combines the train, evaluate, and plot subcommands into one step.
@@ -370,6 +375,7 @@ def run_pipeline(config, retrain, data_path, output):
     cfg = load_pipeline_config(config)
     h5ad_path = data_path or cfg.data
     out_dir = output or cfg.output
+    plots_out = plots_dir or cfg.plots_dir
     os.makedirs(out_dir, exist_ok=True)
 
     artifact_path = os.path.join(out_dir, "model_artifact.joblib")
@@ -428,7 +434,7 @@ def run_pipeline(config, retrain, data_path, output):
     # ── Step 5: Plots ────────────────────────────────────────────────────────
     click.echo("\n=== Generating Plots ===")
     plotting.generate_all_plots(
-        adata, importances, out_dir,
+        adata, importances, plots_out,
         umap_color_columns=cfg.plots.umap_columns,
         umap_genes=cfg.plots.umap_genes,
     )
@@ -1282,6 +1288,13 @@ def correct_zarr(
         h5ad_path = zarr_utils.zarr_to_h5ad(corrected_path, chunk_size=chunk_size)
         click.echo(f"  h5ad: {h5ad_path}")
 
+        # The h5ad is the canonical output — drop the zarr intermediates so
+        # output/processed only contains loadable h5ad files.
+        for p in (zarr_path, corrected_path):
+            if os.path.isdir(p):
+                shutil.rmtree(p)
+                click.echo(f"  Removed intermediate zarr: {p}")
+
     click.echo("\nDone!")
 
 
@@ -1302,7 +1315,11 @@ def correct_zarr(
     "--chunk-size", default=5000, type=int,
     help="Cells per read chunk (default: 5000).",
 )
-def zarr_to_h5ad_cmd(zarr_path, h5ad_path, chunk_size):
+@click.option(
+    "--delete-zarr", is_flag=True, default=False,
+    help="Delete the source zarr store after the h5ad is written successfully.",
+)
+def zarr_to_h5ad_cmd(zarr_path, h5ad_path, chunk_size, delete_zarr):
     """Convert a Zarr store back to h5ad format.
 
     Reads the Zarr store chunk by chunk, assembles a sparse AnnData, and
@@ -1315,6 +1332,61 @@ def zarr_to_h5ad_cmd(zarr_path, h5ad_path, chunk_size):
     """
     result = zarr_utils.zarr_to_h5ad(zarr_path, h5ad_path=h5ad_path, chunk_size=chunk_size)
     click.echo(f"\nDone! h5ad: {result}")
+
+    if delete_zarr and os.path.isdir(zarr_path):
+        shutil.rmtree(zarr_path)
+        click.echo(f"Removed zarr store: {zarr_path}")
+
+
+@cli.command("dataset-umap")
+@click.option(
+    "--data", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Combined .h5ad file (e.g. output/processed/combined_processed.h5ad).",
+)
+@click.option(
+    "--dataset", "dataset_name", default=None,
+    help="Dataset ID to plot (e.g. GSE154778). If omitted, plots all datasets.",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default="./output/plots",
+    help="Output directory for the PNG files.",
+)
+def dataset_umap(data, dataset_name, output):
+    """Side-by-side UMAP for a single dataset: leiden/cell-type vs condition.
+
+    Subsets the combined dataset to one (or each) dataset, recomputes
+    embeddings on the subset, and generates a two-panel UMAP:
+      - Left panel: colored by cell type (if available) or leiden cluster
+      - Right panel: colored by condition (malignant vs normal)
+
+    Example:
+
+        scribe dataset-umap --data ./output/processed/combined_processed.h5ad
+        scribe dataset-umap --data ./output/processed/combined_processed.h5ad --dataset GSE162708
+    """
+    import scanpy as sc
+
+    click.echo("\n=== Loading Data ===")
+    adata = sc.read_h5ad(data)
+    click.echo(f"  {adata.n_obs} cells × {adata.n_vars} genes")
+
+    datasets = (
+        [dataset_name] if dataset_name
+        else adata.obs["dataset"].unique().tolist()
+    )
+
+    os.makedirs(output, exist_ok=True)
+    for ds in datasets:
+        click.echo(f"\n=== UMAP for {ds} ===")
+        save_path = os.path.join(output, f"umap_{ds}.png")
+        plotting.plot_single_dataset_umap(
+            adata, dataset_name=ds, save_path=save_path,
+        )
+
+    click.echo(f"\nDone! Plots saved to {output}/")
 
 
 def main():

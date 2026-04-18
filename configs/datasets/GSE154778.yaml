@@ -8,7 +8,7 @@ description: >
 
 source:
   type: local
-  base_path: "/Users/shash/Library/CloudStorage/GoogleDrive-shashvatsmehta@gmail.com/.shortcut-targets-by-id/1m6XoSPhIWcxsfR8TAwcwAbQMXWcFQw6l/ShashvatHighSchoolCollege/2025ResearchExternship/Datasets"
+  base_path: "./output"
 
 # Primary strategy: combined CSV DGE matrix (genes × cells, gzipped).
 # Fallback: uncomment the tar_10x entry and comment out csv_dge if per-sample
