@@ -1,0 +1,50 @@
+# Pipeline configuration for the train / evaluate / plot subcommands.
+# All values here are defaults; individual CLI flags override them.
+
+# Path to the processed .h5ad file produced by `convert`.
+# Update this to point at the dataset you want to classify.
+data: "./output/GSE154778_processed.h5ad"
+
+# Directory where the model artifact (.joblib) is written.
+output: "./output/processed"
+
+# Directory where all plot PNGs are written.
+plots_dir: "./output/plots"
+
+# Name of the obs column that holds condition labels (e.g. "primary", "metastatic").
+condition_col: "condition"
+
+# Name of the obs column identifying the source dataset (used for batch correction).
+batch_key: "dataset"
+
+model:
+  n_estimators: 100
+  class_weight: "balanced"   # handles class imbalance between conditions
+  random_state: 42
+  test_size: 0.2             # fraction of cells held out for evaluation
+
+analysis:
+  top_n_genes: 20            # number of top feature-importance genes to report
+
+plots:
+  # obs columns to use for UMAP coloring. Only columns present in the data are plotted.
+  umap_columns:
+    - "condition"
+    - "dataset"
+    - "celltype3"
+    - "Cell_type"
+  # Specific genes to overlay on UMAP. Empty list = top 2 from feature importances.
+  umap_genes: []
+
+batch:
+  batch_key: "dataset"
+  housekeeping_genes:
+    - "ACTB"
+    - "GAPDH"
+    - "B2M"
+    - "RPL13A"
+    - "RPLP0"
+    - "PPIA"
+  correction_method: "harmony"   # harmony (default), combat, scanorama, or all
+  n_top_genes: 3000              # batch-aware HVGs selected jointly after merge
+  n_neighbors_mixing: 50         # k for batch mixing score

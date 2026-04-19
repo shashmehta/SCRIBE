@@ -31,13 +31,14 @@ def train(
         The trained RandomForestClassifier.
     """
     print("Training Random Forest Classifier...")
+    # Build the forest — 100 decision trees that each vote on cell type
     clf = RandomForestClassifier(
         n_estimators=n_estimators,
-        class_weight=class_weight,
-        random_state=random_state,
-        n_jobs=-1,
+        class_weight=class_weight,  # "balanced" prevents the majority class from dominating
+        random_state=random_state,  # Fixed seed makes results reproducible
+        n_jobs=-1,  # Use all available CPU cores to speed up training
     )
-    clf.fit(X_train, y_train)
+    clf.fit(X_train, y_train)  # Learn the relationship between gene expression and condition
     print("  Training complete.")
     return clf
 
@@ -59,10 +60,12 @@ def evaluate(
     Returns:
         Dict with keys: 'y_pred', 'report_str', 'confusion_matrix'.
     """
-    y_pred = model.predict(X_test)
-    target_names = label_encoder.classes_.tolist()
+    y_pred = model.predict(X_test)  # Run the model on cells it has never seen before
+    target_names = label_encoder.classes_.tolist()  # Convert numeric labels back to names
 
+    # Summarize precision, recall, and F1 score for each class
     report = classification_report(y_test, y_pred, target_names=target_names)
+    # Count correct vs incorrect predictions in a grid (rows = actual, cols = predicted)
     cm = confusion_matrix(y_test, y_pred)
 
     print("\nClassification Report:")
@@ -88,8 +91,9 @@ def get_feature_importances(
     Returns:
         pd.Series of top gene importances, sorted descending.
     """
+    # Pair each gene name with the score the forest assigned to it
     importances = pd.Series(model.feature_importances_, index=gene_names)
-    top = importances.nlargest(top_n)
+    top = importances.nlargest(top_n)  # Keep only the most important genes
 
     print(f"\nTop {top_n} gene feature importances:")
     print(top.to_string())
@@ -111,13 +115,14 @@ def save_artifact(
         label_encoder: Fitted LabelEncoder.
         gene_names: List of gene names matching the model's feature order.
     """
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)  # Create the output folder if needed
+    # Bundle everything needed to make predictions into one dictionary
     artifact = {
         "model": model,
         "label_encoder": label_encoder,
         "gene_names": gene_names,
     }
-    joblib.dump(artifact, path)
+    joblib.dump(artifact, path)  # Serialize the dictionary to disk
     print(f"Model artifact saved to {path}")
 
 
@@ -136,10 +141,11 @@ def load_artifact(
         FileNotFoundError: If the artifact file does not exist.
         KeyError: If the artifact is missing required keys.
     """
+    # Make sure the file exists before trying to open it
     if not Path(path).exists():
         raise FileNotFoundError(f"Model artifact not found at {path}")
 
-    artifact = joblib.load(path)
+    artifact = joblib.load(path)  # Deserialize the saved dictionary from disk
 
     # Validate required keys
     required = {"model", "label_encoder", "gene_names"}
