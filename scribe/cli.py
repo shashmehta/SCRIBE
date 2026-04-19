@@ -1389,6 +1389,379 @@ def dataset_umap(data, dataset_name, output):
     click.echo(f"\nDone! Plots saved to {output}/")
 
 
+# ── hk-pca-compare ────────────────────────────────────────────────────────────
+
+@cli.command("hk-pca-compare")
+@click.option(
+    "--uncorrected", "uncorrected_path", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to the uncorrected combined .h5ad.",
+)
+@click.option(
+    "--combat", "combat_path", default=None,
+    type=click.Path(exists=False, dir_okay=False),
+    help="Path to ComBat-corrected .h5ad (optional).",
+)
+@click.option(
+    "--harmony", "harmony_path", default=None,
+    type=click.Path(exists=False, dir_okay=False),
+    help="Path to Harmony-corrected .h5ad (optional).",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default="./output/plots",
+    help="Output directory. Default: ./output/plots",
+)
+@click.option(
+    "--batch-key", "batch_key", default="dataset",
+    help="obs column for coloring scatter points. Default: dataset",
+)
+@click.option(
+    "--filename", default="hk_pca_comparison.png",
+    help="Output filename. Default: hk_pca_comparison.png",
+)
+@click.option(
+    "--hk-genes", "hk_genes_str", default=None,
+    help="Comma-separated housekeeping genes to use. Defaults to ACTB,GAPDH,B2M,RPL13A,RPLP0,PPIA.",
+)
+def hk_pca_compare(uncorrected_path, combat_path, harmony_path, output, batch_key, filename, hk_genes_str):
+    """Side-by-side HK Gene PCA: uncorrected / ComBat / Harmony.
+
+    Reads each .h5ad directly (no cache), subsets to housekeeping genes,
+    runs 2-component PCA per method, and plots scatter panels colored by
+    batch_key.  ComBat and Harmony panels are optional.
+
+    Examples:
+
+        scribe hk-pca-compare \\
+            --uncorrected output/processed/combined_processed.h5ad \\
+            --combat      output/processed/combined_processed_corrected.h5ad \\
+            --harmony     output/processed/combined_processed_harmony.h5ad
+    """
+    import scanpy as sc
+
+    adatas: dict = {}
+
+    click.echo("\n=== Loading AnnData files ===")
+    click.echo(f"  Uncorrected: {uncorrected_path}")
+    adatas["Uncorrected"] = sc.read_h5ad(uncorrected_path)
+    click.echo(f"    {adatas['Uncorrected'].n_obs} cells × {adatas['Uncorrected'].n_vars} genes")
+
+    if combat_path:
+        if not os.path.exists(combat_path):
+            raise click.BadParameter(f"ComBat file not found: {combat_path}", param_hint="--combat")
+        click.echo(f"  ComBat: {combat_path}")
+        adatas["ComBat"] = sc.read_h5ad(combat_path)
+
+    if harmony_path:
+        if not os.path.exists(harmony_path):
+            raise click.BadParameter(f"Harmony file not found: {harmony_path}", param_hint="--harmony")
+        click.echo(f"  Harmony: {harmony_path}")
+        adatas["Harmony (reconstructed)"] = sc.read_h5ad(harmony_path)
+
+    os.makedirs(output, exist_ok=True)
+    save_path = os.path.join(output, filename)
+
+    hk_genes = [g.strip() for g in hk_genes_str.split(",")] if hk_genes_str else None
+
+    click.echo(f"\n=== Computing HK Gene PCA ===")
+    plotting.plot_hk_pca_comparison(
+        adatas, hk_genes=hk_genes, batch_key=batch_key, save_path=save_path,
+    )
+    click.echo(f"\nDone! Saved to {save_path}")
+
+
+# ── volcano ───────────────────────────────────────────────────────────────────
+
+@cli.command("volcano")
+@click.option(
+    "--data", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Combined .h5ad file (corrected) to subset panels from.",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default="./output/plots/volcano",
+    help="Output directory. Default: ./output/plots/volcano",
+)
+@click.option(
+    "--condition-col", "condition_col", default="condition",
+    help="obs column holding condition labels. Default: condition",
+)
+@click.option(
+    "--batch-key", "batch_key", default="dataset",
+    help="obs column holding dataset labels. Default: dataset",
+)
+@click.option(
+    "--numerator", default="malignant",
+    help="Default numerator condition (positive LFC side). Default: malignant",
+)
+@click.option(
+    "--denominator", default="normal",
+    help="Default denominator condition. Default: normal",
+)
+@click.option(
+    "--comparisons", "comparisons_path", default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="YAML file listing custom comparison panels (see docs). "
+         "If omitted, auto-detects per-dataset + combined panels.",
+)
+@click.option(
+    "--pval", "padj_threshold", default=0.05, type=float,
+    help="Adjusted p-value significance threshold. Default: 0.05",
+)
+@click.option(
+    "--lfc", "lfc_threshold", default=1.0, type=float,
+    help="Log fold change significance threshold. Default: 1.0",
+)
+@click.option(
+    "--n-labels", "n_labels", default=8, type=int,
+    help="Number of gene labels per panel. Default: 8",
+)
+@click.option(
+    "--n-cols", "n_cols", default=2, type=int,
+    help="Grid columns. Default: 2",
+)
+@click.option(
+    "--filename", default=None,
+    help="Output filename (without path). Default: volcano.png",
+)
+def volcano(data, output, condition_col, batch_key, numerator, denominator,
+            comparisons_path, padj_threshold, lfc_threshold, n_labels, n_cols, filename):
+    """Volcano plot grid, one panel per comparison.
+
+    By default, auto-detects datasets with both conditions and adds a combined
+    panel. Supply --comparisons to override with a YAML list of custom panels
+    (useful for datasets like GSE154778 that need a non-standard comparison):
+
+    \b
+        # comparisons.yaml
+        - dataset_filter: GSE154778
+          obs_key: _derived_condition
+          derive_from: sample
+          prefix_map:
+            metastatic: metastatic
+            primary: primary
+          group_a: metastatic
+          group_b: primary
+          label: "GSE154778 — PDAC"
+
+    Examples:
+
+        scribe volcano --data output/processed/combined_processed_harmony.h5ad
+
+        scribe volcano --data output/processed/combined_processed_harmony.h5ad \\
+            --comparisons configs/volcano_comparisons.yaml \\
+            --filename volcano_harmony_4panel.png
+    """
+    import scanpy as sc
+
+    click.echo("\n=== Loading Data ===")
+    adata = sc.read_h5ad(data)
+    click.echo(f"  {adata.n_obs} cells × {adata.n_vars} genes")
+
+    comparisons = None
+    if comparisons_path:
+        import yaml
+        with open(comparisons_path) as f:
+            comparisons = yaml.safe_load(f)
+        click.echo(f"  Loaded {len(comparisons)} custom comparisons from {comparisons_path}")
+
+    os.makedirs(output, exist_ok=True)
+    fname = filename or "volcano.png"
+    save_path = os.path.join(output, fname)
+
+    click.echo(f"\n=== Running DE and plotting volcano grid ===")
+    plotting.volcano_grid_from_adata(
+        adata,
+        comparisons=comparisons,
+        condition_col=condition_col,
+        batch_key=batch_key,
+        numerator=numerator,
+        denominator=denominator,
+        lfc_threshold=lfc_threshold,
+        padj_threshold=padj_threshold,
+        n_labels=n_labels,
+        n_cols=n_cols,
+        save_path=save_path,
+    )
+    click.echo(f"\nDone! Saved to {save_path}")
+
+
+# ── feature-grid ──────────────────────────────────────────────────────────────
+
+@cli.command("feature-grid")
+@click.option(
+    "--data", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Combined corrected .h5ad file — panels are subset from this.",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default="./output/plots/feature_importance",
+    help="Output directory. Default: ./output/plots/feature_importance",
+)
+@click.option(
+    "--condition-col", "condition_col", default="condition",
+    help="obs column holding condition labels. Default: condition",
+)
+@click.option(
+    "--batch-key", "batch_key", default="dataset",
+    help="obs column holding dataset labels. Default: dataset",
+)
+@click.option(
+    "--numerator", default="malignant",
+    help="Positive class label. Default: malignant",
+)
+@click.option(
+    "--denominator", default="normal",
+    help="Negative class label. Default: normal",
+)
+@click.option(
+    "--n-top", "n_top_genes", default=10, type=int,
+    help="Top-N genes per panel. Default: 10",
+)
+@click.option(
+    "--n-estimators", "n_estimators", default=200, type=int,
+    help="RandomForest n_estimators. Default: 200",
+)
+@click.option(
+    "--layer", default="X_norm",
+    help="Layer to use as features (default X_norm; falls back to X if absent).",
+)
+@click.option(
+    "--filename", default="feature_importance_grid.png",
+    help="Output filename. Default: feature_importance_grid.png",
+)
+def feature_grid(data, output, condition_col, batch_key, numerator, denominator,
+                 n_top_genes, n_estimators, layer, filename):
+    """2×N feature importance grid: one RF panel per dataset + combined.
+
+    Subsets the corrected combined AnnData by dataset, trains a balanced
+    RandomForestClassifier (numerator vs denominator) on each subset, and
+    plots the top-N gene importances as horizontal bar charts.
+
+    Use --layer X_norm (default) to train on z-scored expression, or
+    omit/empty to use X (log1p).
+
+    Examples:
+
+        scribe feature-grid --data output/processed/combined_processed_harmony.h5ad
+
+        scribe feature-grid --data output/processed/combined_processed_harmony.h5ad \\
+            --n-estimators 100 --n-top 15
+    """
+    import scanpy as sc
+
+    click.echo("\n=== Loading Data ===")
+    adata = sc.read_h5ad(data)
+    click.echo(f"  {adata.n_obs} cells × {adata.n_vars} genes")
+
+    os.makedirs(output, exist_ok=True)
+    save_path = os.path.join(output, filename)
+    layer_arg = layer if layer else None
+
+    click.echo(f"\n=== Training RF per dataset and plotting importances ===")
+    plotting.plot_feature_importance_grid(
+        adata,
+        condition_col=condition_col,
+        batch_key=batch_key,
+        numerator=numerator,
+        denominator=denominator,
+        n_top_genes=n_top_genes,
+        n_estimators=n_estimators,
+        layer=layer_arg,
+        save_path=save_path,
+    )
+    click.echo(f"\nDone! Saved to {save_path}")
+
+
+# ── lfc-plot ──────────────────────────────────────────────────────────────────
+
+@cli.command("lfc-plot")
+@click.option(
+    "--data", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Combined .h5ad file with log1p expression in X.",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default="./output/plots/log_fold_change",
+    help="Output directory for the PNG. Default: ./output/plots/log_fold_change",
+)
+@click.option(
+    "--condition-col", "condition_col", default="condition",
+    help="obs column holding condition labels. Default: condition",
+)
+@click.option(
+    "--batch-key", "batch_key", default="dataset",
+    help="obs column holding dataset/batch labels. Default: dataset",
+)
+@click.option(
+    "--numerator", default="malignant",
+    help="Condition label for the numerator (positive LFC side). Default: malignant",
+)
+@click.option(
+    "--denominator", default="normal",
+    help="Condition label for the denominator. Default: normal",
+)
+@click.option(
+    "--layer", default=None,
+    help="Layer to read expression from instead of X (e.g. X_corrected).",
+)
+@click.option(
+    "--top-n", "top_n", default=10, type=int,
+    help="Top-N genes by |LFC| per panel. Default: 10",
+)
+@click.option(
+    "--filename", default=None,
+    help="Output filename (without path). Default: lfc_<numerator>_vs_<denominator>.png",
+)
+def lfc_plot(data, output, condition_col, batch_key, numerator, denominator, layer, top_n, filename):
+    """2×N grid of log fold change bar charts, one panel per dataset + combined.
+
+    Reads expression from X (or --layer), computes signed log fold change
+    (numerator - denominator) for each dataset subset and the combined pool,
+    then saves a bar-chart grid.  Datasets missing one condition are shown as
+    blank panels with an explanatory note.
+
+    Examples:
+
+        scribe lfc-plot --data output/processed/combined_processed.h5ad
+
+        scribe lfc-plot --data output/processed/combined_processed_harmony.h5ad \\
+            --output output/plots/log_fold_change --filename lfc_harmony.png
+    """
+    import scanpy as sc
+
+    click.echo("\n=== Loading Data ===")
+    adata = sc.read_h5ad(data)
+    click.echo(f"  {adata.n_obs} cells × {adata.n_vars} genes")
+    click.echo(f"  Conditions: {adata.obs[condition_col].value_counts().to_dict()}")
+    click.echo(f"  Datasets:   {adata.obs[batch_key].value_counts().to_dict()}")
+
+    os.makedirs(output, exist_ok=True)
+    fname = filename or f"lfc_{numerator}_vs_{denominator}.png"
+    save_path = os.path.join(output, fname)
+
+    click.echo(f"\n=== Computing LFC ({numerator} vs {denominator}) ===")
+    plotting.lfc_grid_from_adata(
+        adata,
+        condition_col=condition_col,
+        batch_key=batch_key,
+        numerator=numerator,
+        denominator=denominator,
+        layer=layer,
+        top_n=top_n,
+        save_path=save_path,
+    )
+    click.echo(f"\nDone! Saved to {save_path}")
+
+
 def main():
     """Entry point called by run.py and the `scribe` console script."""
     cli()
