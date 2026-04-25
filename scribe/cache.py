@@ -9,6 +9,7 @@ Supports three method variants: "uncorrected", "combat", "harmony".
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,15 +18,21 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
-CACHE_DIR = Path("output/processed/app_cache")
-MANIFEST_FILE = CACHE_DIR / "cache_manifest.json"
+from scribe import paths
 
-UNCORRECTED_H5AD = Path("output/processed/combined_processed.h5ad")
-COMBAT_H5AD = Path("output/processed/combined_processed_corrected.h5ad")
-HARMONY_H5AD = Path("output/processed/combined_processed_harmony.h5ad")
+# Files that live on Drive (large expression matrices, loaded on-demand per gene).
+_DRIVE_FILES = frozenset({
+    "uncorrected_expr.parquet",
+    "combat_expr.parquet",
+    "harmony_expr.parquet",
+})
 
-# Legacy alias
-CORRECTED_H5AD = COMBAT_H5AD
+
+def _cache_path(filename: str) -> Path:
+    """Route a cache filename to local disk (small) or Drive (large)."""
+    if filename in _DRIVE_FILES:
+        return paths.get_drive_cache_dir() / filename
+    return paths.get_local_cache_dir() / filename
 
 # Tirosh et al. 2015 cell cycle marker gene lists
 # Used by sc.tl.score_genes_cell_cycle() to assign G1/S/G2M phase per cell.
@@ -71,47 +78,66 @@ _HARMONY_CACHE_FILES = [
 
 def get_h5ad_paths() -> tuple[Path, Path, Path]:
     """Return (uncorrected, combat, harmony) h5ad paths."""
-    return UNCORRECTED_H5AD, COMBAT_H5AD, HARMONY_H5AD
+    return paths.get_h5ad_paths()
 
 
 def has_harmony_cache() -> bool:
     """Check whether Harmony parquet files exist in the cache."""
-    return all((CACHE_DIR / name).exists() for name in _HARMONY_CACHE_FILES)
+    return all(_cache_path(name).exists() for name in _HARMONY_CACHE_FILES)
+
+
+def _file_fingerprint(path: Path) -> str:
+    """Fast content fingerprint: size + hash of first/last 16 KB.
+
+    Stable across machines (depends on content, not filesystem metadata),
+    so Google Drive sync won't cause spurious cache invalidation.
+    """
+    size = path.stat().st_size
+    h = hashlib.sha256()
+    h.update(str(size).encode())
+    with open(path, "rb") as f:
+        h.update(f.read(16384))
+        if size > 16384:
+            f.seek(max(0, size - 16384))
+            h.update(f.read(16384))
+    return h.hexdigest()
 
 
 def is_cache_stale() -> bool:
-    """Check whether the Parquet cache is missing or older than source h5ad files."""
-    if not MANIFEST_FILE.exists():
+    """Check whether the Parquet cache is missing or differs from source h5ad files."""
+    manifest_path = _cache_path("cache_manifest.json")
+    if not manifest_path.exists():
         return True
 
-    with open(MANIFEST_FILE) as f:
+    with open(manifest_path) as f:
         manifest = json.load(f)
 
     uncorr_path, combat_path, harmony_path = get_h5ad_paths()
 
     # Uncorrected and ComBat are required
     for key, path in [
-        ("uncorrected_mtime", uncorr_path),
-        ("combat_mtime", combat_path),
+        ("uncorrected_fingerprint", uncorr_path),
+        ("combat_fingerprint", combat_path),
     ]:
         if key not in manifest:
             return True
         if not path.exists():
             return True
-        if os.path.getmtime(path) > manifest[key]:
+        if _file_fingerprint(path) != manifest[key]:
             return True
 
     for name in _REQUIRED_CACHE_FILES:
-        if not (CACHE_DIR / name).exists():
+        if not _cache_path(name).exists():
             return True
 
     # Harmony is optional: if the h5ad exists but cache is missing or stale,
     # we rebuild. If the h5ad doesn't exist, we skip harmony entirely.
     if harmony_path.exists():
-        if manifest.get("harmony_mtime", 0) < os.path.getmtime(harmony_path):
+        fp = _file_fingerprint(harmony_path)
+        if manifest.get("harmony_fingerprint") != fp:
             return True
         for name in _HARMONY_CACHE_FILES:
-            if not (CACHE_DIR / name).exists():
+            if not _cache_path(name).exists():
                 return True
 
     return False
@@ -160,13 +186,20 @@ def _dense_expr_df(adata) -> pd.DataFrame:
 
 
 def build_cache(force: bool = False) -> None:
-    """Build Parquet cache from h5ad files, loading one at a time for memory safety."""
+    """Build Parquet cache from h5ad files, loading one at a time for memory safety.
+
+    Small files (metadata, UMAP, HK) go to local disk for fast reads.
+    Large expression parquets go to Drive (loaded on-demand per gene).
+    """
     import scanpy as sc
 
     if not force and not is_cache_stale():
         return
 
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    local_dir = paths.get_local_cache_dir()
+    drive_dir = paths.get_drive_cache_dir()
+    local_dir.mkdir(parents=True, exist_ok=True)
+    drive_dir.mkdir(parents=True, exist_ok=True)
 
     uncorr_path, combat_path, harmony_path = get_h5ad_paths()
 
@@ -176,22 +209,22 @@ def build_cache(force: bool = False) -> None:
     _score_cell_cycle(adata)
 
     _dense_expr_df(adata).to_parquet(
-        CACHE_DIR / "uncorrected_expr.parquet", engine="pyarrow"
+        _cache_path("uncorrected_expr.parquet"), engine="pyarrow"
     )
 
     obs_cols = ["dataset", "condition", "leiden", "phase", "sample"]
     adata.obs[obs_cols].copy().reset_index(drop=True).to_parquet(
-        CACHE_DIR / "obs_metadata.parquet", engine="pyarrow"
+        _cache_path("obs_metadata.parquet"), engine="pyarrow"
     )
 
     _extract_umap(adata).to_parquet(
-        CACHE_DIR / "uncorrected_umap.parquet", engine="pyarrow"
+        _cache_path("uncorrected_umap.parquet"), engine="pyarrow"
     )
     _extract_hk_expression(adata).to_parquet(
-        CACHE_DIR / "uncorrected_hk_expr.parquet", engine="pyarrow"
+        _cache_path("uncorrected_hk_expr.parquet"), engine="pyarrow"
     )
 
-    uncorr_mtime = os.path.getmtime(uncorr_path)
+    uncorr_fp = _file_fingerprint(uncorr_path)
     del adata
     gc.collect()
 
@@ -212,24 +245,24 @@ def build_cache(force: bool = False) -> None:
     _score_cell_cycle(adata)
 
     _dense_expr_df(adata).to_parquet(
-        CACHE_DIR / "combat_expr.parquet", engine="pyarrow"
+        _cache_path("combat_expr.parquet"), engine="pyarrow"
     )
     _extract_umap(adata).to_parquet(
-        CACHE_DIR / "combat_umap.parquet", engine="pyarrow"
+        _cache_path("combat_umap.parquet"), engine="pyarrow"
     )
     _extract_hk_expression(adata).to_parquet(
-        CACHE_DIR / "combat_hk_expr.parquet", engine="pyarrow"
+        _cache_path("combat_hk_expr.parquet"), engine="pyarrow"
     )
     adata.obs[["leiden", "phase"]].copy().reset_index(drop=True).to_parquet(
-        CACHE_DIR / "combat_obs_metadata.parquet", engine="pyarrow"
+        _cache_path("combat_obs_metadata.parquet"), engine="pyarrow"
     )
 
-    combat_mtime = os.path.getmtime(combat_path)
+    combat_fp = _file_fingerprint(combat_path)
     del adata
     gc.collect()
 
     # --- Harmony (optional) ---
-    harmony_mtime = None
+    harmony_fp = None
     if harmony_path.exists():
         print("Loading Harmony-corrected h5ad...")
         adata = sc.read_h5ad(str(harmony_path))
@@ -250,19 +283,19 @@ def build_cache(force: bool = False) -> None:
         _score_cell_cycle(adata)
 
         _dense_expr_df(adata).to_parquet(
-            CACHE_DIR / "harmony_expr.parquet", engine="pyarrow"
+            _cache_path("harmony_expr.parquet"), engine="pyarrow"
         )
         _extract_umap(adata).to_parquet(
-            CACHE_DIR / "harmony_umap.parquet", engine="pyarrow"
+            _cache_path("harmony_umap.parquet"), engine="pyarrow"
         )
         _extract_hk_expression(adata).to_parquet(
-            CACHE_DIR / "harmony_hk_expr.parquet", engine="pyarrow"
+            _cache_path("harmony_hk_expr.parquet"), engine="pyarrow"
         )
         adata.obs[["leiden", "phase"]].copy().reset_index(drop=True).to_parquet(
-            CACHE_DIR / "harmony_obs_metadata.parquet", engine="pyarrow"
+            _cache_path("harmony_obs_metadata.parquet"), engine="pyarrow"
         )
 
-        harmony_mtime = os.path.getmtime(harmony_path)
+        harmony_fp = _file_fingerprint(harmony_path)
         del adata
         gc.collect()
     else:
@@ -271,12 +304,13 @@ def build_cache(force: bool = False) -> None:
 
     # --- Manifest ---
     manifest = {
-        "uncorrected_mtime": uncorr_mtime,
-        "combat_mtime": combat_mtime,
+        "uncorrected_fingerprint": uncorr_fp,
+        "combat_fingerprint": combat_fp,
     }
-    if harmony_mtime is not None:
-        manifest["harmony_mtime"] = harmony_mtime
-    with open(MANIFEST_FILE, "w") as f:
+    if harmony_fp is not None:
+        manifest["harmony_fingerprint"] = harmony_fp
+    manifest_path = _cache_path("cache_manifest.json")
+    with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
 
     print("Cache built successfully.")
@@ -299,13 +333,13 @@ def load_gene_expression(genes: list[str], method: str = "uncorrected") -> pd.Da
     """Load only the requested gene columns from the Parquet cache."""
     prefix = _method_prefix(method)
     return pd.read_parquet(
-        CACHE_DIR / f"{prefix}_expr.parquet", columns=genes, engine="pyarrow"
+        _cache_path(f"{prefix}_expr.parquet"), columns=genes, engine="pyarrow"
     )
 
 
 def load_obs_metadata() -> pd.DataFrame:
     """Load cell metadata (dataset, condition, leiden, phase, sample)."""
-    return pd.read_parquet(CACHE_DIR / "obs_metadata.parquet", engine="pyarrow")
+    return pd.read_parquet(_cache_path("obs_metadata.parquet"), engine="pyarrow")
 
 
 def load_method_obs(method: str) -> pd.DataFrame:
@@ -317,7 +351,7 @@ def load_method_obs(method: str) -> pd.DataFrame:
         return load_obs_metadata()
     prefix = _method_prefix(method)
     return pd.read_parquet(
-        CACHE_DIR / f"{prefix}_obs_metadata.parquet", engine="pyarrow"
+        _cache_path(f"{prefix}_obs_metadata.parquet"), engine="pyarrow"
     )
 
 
@@ -325,7 +359,7 @@ def load_umap_coords(method: str = "uncorrected") -> pd.DataFrame:
     """Load 2D UMAP coordinates. Returns DataFrame with UMAP1, UMAP2 columns."""
     prefix = _method_prefix(method)
     return pd.read_parquet(
-        CACHE_DIR / f"{prefix}_umap.parquet", engine="pyarrow"
+        _cache_path(f"{prefix}_umap.parquet"), engine="pyarrow"
     )
 
 
@@ -333,7 +367,7 @@ def load_hk_expression(method: str = "uncorrected") -> pd.DataFrame:
     """Load housekeeping gene expression for live PCA computation."""
     prefix = _method_prefix(method)
     return pd.read_parquet(
-        CACHE_DIR / f"{prefix}_hk_expr.parquet", engine="pyarrow"
+        _cache_path(f"{prefix}_hk_expr.parquet"), engine="pyarrow"
     )
 
 
@@ -341,7 +375,7 @@ def get_gene_list() -> list[str]:
     """Read gene names from the Parquet schema without loading expression data."""
     import pyarrow.parquet as pq
 
-    schema = pq.read_schema(CACHE_DIR / "uncorrected_expr.parquet")
+    schema = pq.read_schema(_cache_path("uncorrected_expr.parquet"))
     return schema.names
 
 

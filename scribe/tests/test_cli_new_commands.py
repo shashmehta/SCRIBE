@@ -138,3 +138,17 @@ class TestHkPcaCompareCommand:
         ])
         assert r.exit_code == 0, r.output
         assert (tmp_path / "hk_2panel.png").exists()
+
+
+# ── TestSetupCommand ──────────────────────────────────────────────────────────
+
+class TestSetupCommand:
+    def test_exits_zero(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SCRIBE_OUTPUT_DIR", str(tmp_path))
+        r = CliRunner().invoke(cli, ["setup"])
+        assert r.exit_code == 0, r.output
+
+    def test_prints_output_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SCRIBE_OUTPUT_DIR", str(tmp_path))
+        r = CliRunner().invoke(cli, ["setup"])
+        assert str(tmp_path) in r.output

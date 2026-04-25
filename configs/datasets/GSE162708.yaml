@@ -25,41 +25,24 @@ preprocessing:
   n_pcs: 30
   leiden_resolution: 0.5
 
-cellxgene:
-  assay_ontology_term_id: "EFO:0009922"      # 10x 3' v2
-  disease_ontology_term_id: "MONDO:0006130"  # pancreatic neuroendocrine tumor
-  tissue_ontology_term_id: "UBERON:0001264"  # pancreas (default; overridden per sample below)
-  organism_ontology_term_id: "NCBITaxon:9606"
-
 # Cells are demultiplexed by the numeric barcode suffix (-1 through -5).
-# Tissue ontology overrides are set per sample because tissues differ.
 samples:
   - id: "primary_tumor_1"
     condition: "primary_tumor"
     barcode_suffix: "1"
-    tissue_ontology_term_id: "UBERON:0001264"   # pancreas
-    disease_ontology_term_id: "MONDO:0006130"   # pNET
 
   - id: "primary_tumor_2"
     condition: "primary_tumor"
     barcode_suffix: "2"
-    tissue_ontology_term_id: "UBERON:0001264"   # pancreas
-    disease_ontology_term_id: "MONDO:0006130"   # pNET
 
   - id: "liver_metastasis"
     condition: "metastasis"
     barcode_suffix: "3"
-    tissue_ontology_term_id: "UBERON:0002107"   # liver
-    disease_ontology_term_id: "MONDO:0006130"   # pNET
 
   - id: "normal_liver"
     condition: "normal"
     barcode_suffix: "4"
-    tissue_ontology_term_id: "UBERON:0002107"   # liver
-    disease_ontology_term_id: "PATO:0000461"    # normal
 
   - id: "pbmc"
     condition: "normal"
     barcode_suffix: "5"
-    tissue_ontology_term_id: "UBERON:0000178"   # blood
-    disease_ontology_term_id: "PATO:0000461"    # normal

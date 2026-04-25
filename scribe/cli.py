@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 
 from scribe.config import load_dataset_config, load_pipeline_config
+from scribe import paths
 from scribe import geo
 from scribe import data as celldata
 from scribe import model as cellmodel
@@ -28,6 +29,51 @@ from scribe import monitor as cellmonitor
 @click.group()
 def cli():
     """SCRIBE: Single-Cell RNA Interpretable Biomarker Explorer."""
+
+
+# ── setup ────────────────────────────────────────────────────────────────────
+
+@cli.command()
+def setup():
+    """Check SCRIBE setup and display resolved paths.
+
+    Verifies that the output directory exists, shows where data and cache
+    files are stored, and reports h5ad file sizes. Run this after cloning
+    the repo on a new machine to confirm everything is wired up correctly.
+    """
+    output_dir = paths.get_output_dir()
+    processed = paths.get_processed_dir()
+    plots = paths.get_plots_dir()
+    local_cache = paths.get_local_cache_dir()
+    drive_cache = paths.get_drive_cache_dir()
+
+    click.echo("SCRIBE Setup")
+    click.echo(f"  Output dir:     {output_dir} {'(exists)' if output_dir.exists() else '(MISSING)'}")
+
+    if output_dir.is_symlink():
+        click.echo(f"  Symlink target: {output_dir.resolve()}")
+
+    click.echo(f"  Processed dir:  {processed} {'(exists)' if processed.exists() else '(MISSING)'}")
+    click.echo(f"  Plots dir:      {plots} {'(exists)' if plots.exists() else '(MISSING)'}")
+    click.echo(f"  Local cache:    {local_cache} {'(exists)' if local_cache.exists() else '(will be created on first app run)'}")
+    click.echo(f"  Drive cache:    {drive_cache} {'(exists)' if drive_cache.exists() else '(will be created on first app run)'}")
+
+    env_val = os.environ.get("SCRIBE_OUTPUT_DIR")
+    if env_val:
+        click.echo(f"  SCRIBE_OUTPUT_DIR: {env_val}")
+    else:
+        click.echo("  SCRIBE_OUTPUT_DIR: (not set, using ./output)")
+
+    click.echo("\nH5AD files:")
+    for name, p in zip(
+        ["Uncorrected", "ComBat", "Harmony"],
+        paths.get_h5ad_paths(),
+    ):
+        if p.exists():
+            size_mb = p.stat().st_size / 1e6
+            click.echo(f"  {name:12s}  {p}  ({size_mb:.0f} MB)")
+        else:
+            click.echo(f"  {name:12s}  {p}  (not found)")
 
 
 # ── convert ───────────────────────────────────────────────────────────────────
@@ -57,7 +103,7 @@ def convert(config, output):
     """
     # Load the dataset YAML into a typed DatasetConfig dataclass
     cfg = load_dataset_config(config)
-    out_dir = output or "./output/processed"
+    out_dir = output or str(paths.get_processed_dir())
     # Delegate all the work to geo.convert_dataset — this does loading, preprocessing, and saving
     geo.convert_dataset(cfg, out_dir)
 
@@ -456,8 +502,8 @@ def run_pipeline(config, retrain, data_path, output, plots_dir):
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/processed",
-    help="Output directory for the combined .h5ad file.",
+    default=None,
+    help="Output directory for the combined .h5ad file. Default: $SCRIBE_OUTPUT_DIR/processed",
 )
 @click.option(
     "--n-top-genes", default=3000, type=int,
@@ -484,6 +530,7 @@ def merge(data_paths, condition_map_path, output, n_top_genes, no_harmony):
             --condition-map configs/condition_map.yaml \\
             --output ./output/processed
     """
+    output = output or str(paths.get_processed_dir())
     os.makedirs(output, exist_ok=True)
 
     click.echo("\n=== Loading Condition Map ===")
@@ -518,8 +565,8 @@ def merge(data_paths, condition_map_path, output, n_top_genes, no_harmony):
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/processed",
-    help="Output directory for the combined .h5ad file.",
+    default=None,
+    help="Output directory for the combined .h5ad file. Default: $SCRIBE_OUTPUT_DIR/processed",
 )
 @click.option(
     "--skip-convert", is_flag=True, default=False,
@@ -558,6 +605,7 @@ def build(config_paths, condition_map_path, output, skip_convert, rebuild,
             --condition-map configs/condition_map.yaml \\
             --output ./output/processed
     """
+    output = output or str(paths.get_processed_dir())
     os.makedirs(output, exist_ok=True)
     out_path = os.path.join(output, "combined_processed.h5ad")
 
@@ -614,7 +662,7 @@ def build(config_paths, condition_map_path, output, skip_convert, rebuild,
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/batch",
+    default=None,
     help="Output directory for batch diagnostic plots and reports.",
 )
 @click.option(
@@ -641,6 +689,7 @@ def batch_check(data_path, output, batch_key, condition_col):
     """
     import scanpy as sc
 
+    output = output or str(paths.get_output_dir() / "batch")
     os.makedirs(output, exist_ok=True)
 
     click.echo("\n=== Loading Data ===")
@@ -702,7 +751,7 @@ def batch_check(data_path, output, batch_key, condition_col):
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/batch",
+    default=None,
     help="Output directory for plots and distance reports.",
 )
 @click.option(
@@ -734,6 +783,7 @@ def batch_subset(data_path, output, batch_key, condition_col, conditions):
     """
     import scanpy as sc
 
+    output = output or str(paths.get_output_dir() / "batch")
     os.makedirs(output, exist_ok=True)
     cond_list = [c.strip() for c in conditions.split(",")]
 
@@ -791,7 +841,7 @@ def batch_subset(data_path, output, batch_key, condition_col, conditions):
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/corrected",
+    default=None,
     help="Output directory for corrected .h5ad files and comparison plots.",
 )
 @click.option(
@@ -813,6 +863,7 @@ def batch_correct(data_path, method, output, batch_key):
     import scanpy as sc
     from scribe.monitor import ResourceMonitor
 
+    output = output or str(paths.get_output_dir() / "corrected")
     os.makedirs(output, exist_ok=True)
 
     click.echo("\n=== Loading Data ===")
@@ -892,7 +943,7 @@ def batch_correct(data_path, method, output, batch_key):
     help="Path to combined .h5ad OR directory containing per-dataset .h5ad files.",
 )
 @click.option(
-    "--output", default="./output/hk_analysis",
+    "--output", default=None,
     type=click.Path(file_okay=False),
     help="Directory for output plots and CSV results.",
 )
@@ -948,6 +999,7 @@ def hk_analysis(data, output, batch_key, condition_col, pval_threshold, log2fc_t
     import scanpy as sc_lib
     import anndata as ad
 
+    output = output or str(paths.get_output_dir() / "hk_analysis")
     os.makedirs(output, exist_ok=True)
 
     # ── Step 1: Load data ──
@@ -1351,7 +1403,7 @@ def zarr_to_h5ad_cmd(zarr_path, h5ad_path, chunk_size, delete_zarr):
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/plots",
+    default=None,
     help="Output directory for the PNG files.",
 )
 def dataset_umap(data, dataset_name, output):
@@ -1378,6 +1430,7 @@ def dataset_umap(data, dataset_name, output):
         else adata.obs["dataset"].unique().tolist()
     )
 
+    output = output or str(paths.get_plots_dir())
     os.makedirs(output, exist_ok=True)
     for ds in datasets:
         click.echo(f"\n=== UMAP for {ds} ===")
@@ -1410,8 +1463,8 @@ def dataset_umap(data, dataset_name, output):
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/plots",
-    help="Output directory. Default: ./output/plots",
+    default=None,
+    help="Output directory. Default: $SCRIBE_OUTPUT_DIR/plots",
 )
 @click.option(
     "--batch-key", "batch_key", default="dataset",
@@ -1441,6 +1494,7 @@ def hk_pca_compare(uncorrected_path, combat_path, harmony_path, output, batch_ke
     """
     import scanpy as sc
 
+    output = output or str(paths.get_plots_dir())
     adatas: dict = {}
 
     click.echo("\n=== Loading AnnData files ===")
@@ -1483,8 +1537,8 @@ def hk_pca_compare(uncorrected_path, combat_path, harmony_path, output, batch_ke
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/plots/volcano",
-    help="Output directory. Default: ./output/plots/volcano",
+    default=None,
+    help="Output directory. Default: $SCRIBE_OUTPUT_DIR/plots/volcano",
 )
 @click.option(
     "--condition-col", "condition_col", default="condition",
@@ -1558,6 +1612,7 @@ def volcano(data, output, condition_col, batch_key, numerator, denominator,
     """
     import scanpy as sc
 
+    output = output or str(paths.get_plots_dir() / "volcano")
     click.echo("\n=== Loading Data ===")
     adata = sc.read_h5ad(data)
     click.echo(f"  {adata.n_obs} cells × {adata.n_vars} genes")
@@ -1601,8 +1656,8 @@ def volcano(data, output, condition_col, batch_key, numerator, denominator,
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/plots/feature_importance",
-    help="Output directory. Default: ./output/plots/feature_importance",
+    default=None,
+    help="Output directory. Default: $SCRIBE_OUTPUT_DIR/plots/feature_importance",
 )
 @click.option(
     "--condition-col", "condition_col", default="condition",
@@ -1656,6 +1711,7 @@ def feature_grid(data, output, condition_col, batch_key, numerator, denominator,
     """
     import scanpy as sc
 
+    output = output or str(paths.get_plots_dir() / "feature_importance")
     click.echo("\n=== Loading Data ===")
     adata = sc.read_h5ad(data)
     click.echo(f"  {adata.n_obs} cells × {adata.n_vars} genes")
@@ -1690,8 +1746,8 @@ def feature_grid(data, output, condition_col, batch_key, numerator, denominator,
 @click.option(
     "--output",
     type=click.Path(file_okay=False),
-    default="./output/plots/log_fold_change",
-    help="Output directory for the PNG. Default: ./output/plots/log_fold_change",
+    default=None,
+    help="Output directory for the PNG. Default: $SCRIBE_OUTPUT_DIR/plots/log_fold_change",
 )
 @click.option(
     "--condition-col", "condition_col", default="condition",
@@ -1738,6 +1794,7 @@ def lfc_plot(data, output, condition_col, batch_key, numerator, denominator, lay
     """
     import scanpy as sc
 
+    output = output or str(paths.get_plots_dir() / "log_fold_change")
     click.echo("\n=== Loading Data ===")
     adata = sc.read_h5ad(data)
     click.echo(f"  {adata.n_obs} cells × {adata.n_vars} genes")

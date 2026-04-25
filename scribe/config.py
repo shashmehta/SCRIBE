@@ -50,20 +50,6 @@ class PreprocessingConfig:
 
 
 @dataclass
-class CellxGeneConfig:
-    """Standardised ontology IDs required by the cellxGene schema (version 5.0.0).
-
-    Ontologies are controlled vocabularies used across databases so that
-    "pancreas" always means the same thing regardless of which lab recorded it.
-    EFO, UBERON, MONDO, NCBITaxon, and PATO are common ontology namespaces.
-    """
-    assay_ontology_term_id: str = "EFO:0009922"       # 10x Chromium 3' v2 sequencing
-    disease_ontology_term_id: str = "unknown"          # MONDO term, set per dataset
-    tissue_ontology_term_id: str = "UBERON:0001264"   # pancreas
-    organism_ontology_term_id: str = "NCBITaxon:9606" # Homo sapiens
-
-
-@dataclass
 class SampleConfig:
     """Metadata for one biological sample within a dataset.
 
@@ -77,8 +63,6 @@ class SampleConfig:
     barcode_suffix: str | None = None   # the number after the "-" in a 10x barcode
     barcode_prefix: str | None = None   # the part before ":" in "SAMPLE:INDEX" barcodes (e.g. "P03")
     gsm_id: str | None = None           # GEO sample accession, e.g. "GSM5032701"
-    tissue_ontology_term_id: str | None = None   # overrides dataset-level tissue
-    disease_ontology_term_id: str | None = None  # overrides dataset-level disease
 
 
 @dataclass
@@ -90,7 +74,6 @@ class DatasetConfig:
     source: SourceConfig          # where the raw files live
     files: list[FileConfig]       # which files to load and how
     preprocessing: PreprocessingConfig  # QC and dimensionality-reduction settings
-    cellxgene: CellxGeneConfig    # ontology IDs for cellxGene compliance
     samples: list[SampleConfig] = field(default_factory=list)  # per-sample metadata
 
 
@@ -137,8 +120,8 @@ class BatchConfig:
 class PipelineConfig:
     """Everything needed to run the train → evaluate → plot pipeline."""
     data: str                    # path to the processed .h5ad file
-    output: str = "./output/processed"  # where to write the model artifact
-    plots_dir: str = "./output/plots"   # where to write all plot PNGs
+    output: str = ""             # where to write the model artifact (resolved via paths module)
+    plots_dir: str = ""          # where to write all plot PNGs (resolved via paths module)
     condition_col: str = "CONDITION"  # obs column that holds the class labels
     batch_key: str = "dataset"   # obs column identifying the source dataset (for batch correction)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -197,8 +180,10 @@ def load_dataset_config(path: str) -> DatasetConfig:
 
     # Sub-configs are optional in the YAML; fall back to defaults if missing
     preprocessing = PreprocessingConfig(**raw.get("preprocessing", {}))
-    cellxgene = CellxGeneConfig(**raw.get("cellxgene", {}))
-    samples = [SampleConfig(**s) for s in raw.get("samples", [])]
+    samples_raw = raw.get("samples", [])
+    # Drop any per-sample ontology fields that may exist in older configs
+    _ontology_keys = {"tissue_ontology_term_id", "disease_ontology_term_id"}
+    samples = [SampleConfig(**{k: v for k, v in s.items() if k not in _ontology_keys}) for s in samples_raw]
 
     return DatasetConfig(
         id=raw["id"],
@@ -207,7 +192,6 @@ def load_dataset_config(path: str) -> DatasetConfig:
         source=source,
         files=files,
         preprocessing=preprocessing,
-        cellxgene=cellxgene,
         samples=samples,
     )
 
@@ -236,10 +220,12 @@ def load_pipeline_config(path: str) -> PipelineConfig:
     plots = PlotsConfig(**raw.get("plots", {}))
     batch = BatchConfig(**raw.get("batch", {}))
 
+    from scribe import paths
+
     return PipelineConfig(
         data=raw["data"],
-        output=raw.get("output", "./output/processed"),
-        plots_dir=raw.get("plots_dir", "./output/plots"),
+        output=raw.get("output") or str(paths.get_processed_dir()),
+        plots_dir=raw.get("plots_dir") or str(paths.get_plots_dir()),
         condition_col=raw.get("condition_col", "CONDITION"),
         batch_key=raw.get("batch_key", "dataset"),
         model=model,
