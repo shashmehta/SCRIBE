@@ -25,7 +25,7 @@ def _():
 @app.cell
 def _(mo):
     mo.md("""
-    # SCRIBE — Batch Correction Explorer
+    # SCRIBE — ML Framework for Biomarker Discovery
 
     Explore batch correction effects through interactive UMAP, PCA, and gene
     expression viewers. Compares **Uncorrected** vs **ComBat** vs **Harmony**.
@@ -107,12 +107,22 @@ def _(available_hk, cache, gene_selector, harmony_available, hk_button, mo, obs,
         _output = mo.md("*Select one or more genes above to see KDE plots.*")
     else:
         _figures = []
-        _uncorr_df = cache.load_gene_expression(list(_selected), method="uncorrected")
-        _combat_df = cache.load_gene_expression(list(_selected), method="combat")
-        _harmony_df = (
-            cache.load_gene_expression(list(_selected), method="harmony")
-            if harmony_available else None
-        )
+        # Use the small HK-specific parquets when all selected genes are HK genes
+        _all_hk = all(g in available_hk for g in _selected)
+        if _all_hk:
+            _uncorr_df = cache.load_hk_expression(method="uncorrected")[list(_selected)]
+            _combat_df = cache.load_hk_expression(method="combat")[list(_selected)]
+            _harmony_df = (
+                cache.load_hk_expression(method="harmony")[list(_selected)]
+                if harmony_available else None
+            )
+        else:
+            _uncorr_df = cache.load_gene_expression(list(_selected), method="uncorrected")
+            _combat_df = cache.load_gene_expression(list(_selected), method="combat")
+            _harmony_df = (
+                cache.load_gene_expression(list(_selected), method="harmony")
+                if harmony_available else None
+            )
 
         _n_panels = 3 if harmony_available else 2
         _width = 6 * _n_panels
@@ -457,7 +467,8 @@ def _(
 
 @app.cell
 def _(Path, mo):
-    plot_dir = Path("output/plots")
+    from scribe import paths as _paths
+    plot_dir = _paths.get_plots_dir()
 
     _PLOT_NAMES = {
         "HK Analysis: Violin plots": "hk_analysis/housekeeping_violin.png",

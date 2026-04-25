@@ -27,12 +27,6 @@ preprocessing:
   n_pcs: 30
   leiden_resolution: 0.5
 
-cellxgene:
-  assay_ontology_term_id: "EFO:0009922"      # 10x 3' v2
-  disease_ontology_term_id: "MONDO:0006047"  # pancreatic ductal adenocarcinoma
-  tissue_ontology_term_id: "UBERON:0001264"  # pancreas
-  organism_ontology_term_id: "NCBITaxon:9606"
-
 # Sample metadata: barcode prefixes confirmed by running:
 #   python run.py inspect --config configs/datasets/GSE154778.yaml
 # Barcodes use "PREFIX:INDEX" format (e.g. "P03:1"). The prefix identifies the sample.

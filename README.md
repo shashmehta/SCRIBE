@@ -58,11 +58,17 @@ pip install -e .
 
 **4. Set up Google Drive (see next section).**
 
+**5. Verify your setup:**
+```bash
+scribe setup
+```
+This prints all resolved paths, checks for the `output/` symlink, and reports which h5ad files are available.
+
 ---
 
 ## Google Drive Setup
 
-SCRIBE stores **no data on local disk**. All raw datasets, processed files, model artifacts, and plots live on Google Drive so they sync automatically across machines. The project uses an `output/` symlink pointing to a shared Drive folder.
+SCRIBE stores raw datasets, processed files, and large cache files on Google Drive so they sync automatically across machines. The project uses an `output/` symlink pointing to a shared Drive folder. Small cache files (metadata, UMAP coordinates, housekeeping gene data — ~5 MB total) are stored locally at `~/.scribe/cache/` for fast app loading.
 
 ### Step 1 — Install Google Drive for Desktop
 
@@ -91,7 +97,7 @@ SCRIBE/                                    (Google Drive folder)
 │   ├── combined_processed_corrected.h5ad  (ComBat-corrected)
 │   ├── combined_processed_harmony.h5ad    (Harmony-corrected)
 │   ├── model_artifact.joblib
-│   └── app_cache/                         Parquet cache for Marimo app
+│   └── app_cache/                         Large expression parquets (on Drive)
 └── plots/
     ├── log_fold_change/
     ├── volcano/
@@ -122,11 +128,44 @@ New-Item -ItemType SymbolicLink -Path .\output -Target "G:\My Drive\path\to\SCRI
 
 **Verify:**
 ```bash
-ls output/
-# Should show: GSE154778/  GSE162708/  GSE165399/  processed/  plots/
+scribe setup
+# Should show: Output dir: output (exists), Symlink target: ..., all h5ad files found
 ```
 
 All CLI commands write to `./output/` by default, so data flows to Drive automatically.
+
+### Overriding the output directory
+
+Set the `SCRIBE_OUTPUT_DIR` environment variable to use a different base directory:
+
+```bash
+export SCRIBE_OUTPUT_DIR=/path/to/your/data
+scribe setup   # verify paths resolve correctly
+```
+
+All CLI commands and the Marimo app respect this variable. The `output/` symlink is not needed when `SCRIBE_OUTPUT_DIR` is set.
+
+---
+
+## Cache Architecture
+
+The Marimo app uses a **two-tier Parquet cache** for fast, memory-efficient loading:
+
+| Tier | Location | Contents | Size |
+|------|----------|----------|------|
+| **Local** | `~/.scribe/cache/` | Cell metadata, UMAP coordinates, housekeeping gene expression, cache manifest | ~5 MB |
+| **Drive** | `output/processed/app_cache/` | Full gene expression matrices (loaded on-demand per gene selection) | ~960 MB |
+
+Local files are read from SSD for near-instant app startup. Expression data is loaded column-by-column from Drive only when you select specific genes.
+
+**Cache staleness** is detected via content fingerprinting (SHA-256 of file size + first/last 16 KB of each h5ad source). This is stable across machines — Google Drive sync won't trigger unnecessary rebuilds.
+
+**First run:** The cache is built automatically when you launch the app for the first time (or after h5ad files change). This takes 5-10 minutes since it reads the source h5ad files and recomputes embeddings. Subsequent app launches load in seconds.
+
+**Manual rebuild:**
+```bash
+python -c "from scribe import cache; cache.build_cache(force=True)"
+```
 
 ---
 
@@ -282,6 +321,83 @@ scribe hk-analysis \
 
 ---
 
+## Using SCRIBE on Your Own Dataset
+
+SCRIBE can analyze any scRNA-seq dataset — not just the three pancreatic cancer datasets it ships with. The three example configs in `configs/datasets/` cover every supported raw format and can be used as starting points.
+
+### Step 1 — Create a dataset config
+
+Copy the example that matches your data format and edit the fields:
+
+| Example config | Format | Use when your data is... |
+|---|---|---|
+| `GSE154778.yaml` | `csv_dge` | A single gzipped DGE matrix (genes × cells), barcodes encoded as `SAMPLE:INDEX` prefixes |
+| `GSE162708.yaml` | `10x_mtx` | A 10x Chromium directory (barcodes/features/matrix files), barcodes encoded as `BARCODE-N` suffixes |
+| `GSE165399.yaml` | `tar_txt_dge` | A TAR archive of per-sample DGE text files named by GSM accession |
+
+**Minimal config skeleton** (adapt from the examples above):
+
+```yaml
+id: MY_DATASET              # short identifier, used in output filenames
+title: "My scRNA-seq Atlas"
+
+source:
+  type: local
+  base_path: "./output"     # root directory; combine with relative_path below
+
+files:
+  - format: csv_dge         # one of: csv_dge, 10x_mtx, tar_txt_dge, tar_10x
+    relative_path: "MY_DATASET/data.csv.gz"
+
+preprocessing:              # all fields are optional — these are the defaults
+  min_genes: 200
+  min_cells: 3
+  mt_pct_threshold: 20.0
+  n_top_genes: 2000
+  n_pcs: 30
+  leiden_resolution: 0.5
+
+samples:                    # omit entirely if your dataset is single-sample
+  - id: "tumor"
+    condition: "malignant"
+    barcode_suffix: "1"     # use barcode_suffix, barcode_prefix, or gsm_id
+  - id: "normal"
+    condition: "normal"
+    barcode_suffix: "2"
+```
+
+**Identifying your barcode format:** Run `scribe inspect --config configs/datasets/MY_DATASET.yaml` to print the barcode distribution and determine whether to use `barcode_suffix`, `barcode_prefix`, or `gsm_id` for demultiplexing.
+
+### Step 2 — Update the condition map
+
+`configs/condition_map.yaml` maps every unique condition label across all datasets to a unified classification scheme. Add an entry for each condition value that appears in your `samples:` list:
+
+```yaml
+# Add your conditions here — values can map to themselves if no unification is needed
+tumor: malignant
+normal: normal
+```
+
+### Step 3 — Build, train, and explore
+
+```bash
+# Convert + merge all datasets (including your new one)
+scribe build \
+    --config configs/datasets/GSE154778.yaml \
+    --config configs/datasets/GSE162708.yaml \
+    --config configs/datasets/GSE165399.yaml \
+    --config configs/datasets/MY_DATASET.yaml \
+    --condition-map configs/condition_map.yaml
+
+# Train the classifier
+scribe train --config configs/pipeline.yaml
+
+# Launch the interactive explorer
+marimo run app.py
+```
+
+---
+
 ## Marimo Interactive Explorer
 
 `app.py` is a [Marimo](https://marimo.io) reactive notebook for interactively exploring batch correction effects. It compares **Uncorrected**, **ComBat**, and **Harmony** side-by-side.
@@ -296,25 +412,23 @@ scribe hk-analysis \
 
 ### Running the app
 
-**1. Build the Parquet cache** (first run only, or when h5ad files change):
-
-The app detects stale cache automatically on startup and rebuilds it. You can also pre-build manually:
-```bash
-python -c "from scribe import cache; cache.build_cache(force=True)"
-```
-
-This reads the three h5ad files and writes columnar Parquet files to `output/processed/app_cache/`. Cache rebuild takes a few minutes but only runs when source files change.
-
-**2. Launch the app:**
+**1. Launch the app:**
 ```bash
 marimo run app.py
 ```
 
-Opens at `http://localhost:2718` by default. The app loads gene lists and UMAP coordinates in seconds from the Parquet cache; gene expression is loaded on-demand per selection.
+Opens at `http://localhost:2718` by default. On the first launch (or when h5ad files change), the app automatically detects a stale cache and rebuilds it. This initial rebuild takes 5-10 minutes. Subsequent launches load in seconds.
 
-**3. Enable Harmony panel:**
+Small cache files (metadata, UMAP, HK genes) are stored locally at `~/.scribe/cache/` for fast reads. Large expression parquets stay on Drive and are loaded on-demand per gene selection.
+
+**2. Enable Harmony panel:**
 
 The Harmony panel appears automatically if `combined_processed_harmony.h5ad` exists. Run `scribe correct-zarr --method harmony ...` if you haven't already.
+
+**3. Pre-build cache (optional):**
+```bash
+python -c "from scribe import cache; cache.build_cache(force=True)"
+```
 
 > **Note:** The Parquet cache is only used by the Marimo app. All `scribe` CLI commands read from `.h5ad` files directly and are always up to date.
 
@@ -328,6 +442,7 @@ scribe --help
 
 | Command | Description |
 |---------|-------------|
+| `setup` | Verify paths, symlink, and h5ad availability on a new machine |
 | `convert` | Convert a raw GEO dataset to `.h5ad` |
 | `inspect` | Inspect barcode structure for demultiplexing |
 | `merge` | Merge per-dataset `.h5ad` files into a combined file |

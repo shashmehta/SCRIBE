@@ -24,29 +24,17 @@ preprocessing:
   n_pcs: 30
   leiden_resolution: 0.5
 
-cellxgene:
-  assay_ontology_term_id: "EFO:0009922"      # 10x 3' v2
-  disease_ontology_term_id: "unknown"        # varies per sample; set per-cell via samples list
-  tissue_ontology_term_id: "UBERON:0001264"  # pancreas
-  organism_ontology_term_id: "NCBITaxon:9606"
-
 # Each sample is identified by its GSM accession (prefix of the TXT filename).
 # GSM accessions verified against https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE165399
 samples:
   - id: "IPMN"
     condition: "IPMN"
-    gsm_id: "GSM5032771"           # confirmed on GEO: "Sample 1_IPMN_ZX-2"
-    tissue_ontology_term_id: "UBERON:0001264"   # pancreas
-    disease_ontology_term_id: "MONDO:0005052"   # intraductal papillary mucinous neoplasm
+    gsm_id: "GSM5032771"
 
   - id: "PASC"
     condition: "PASC"
-    gsm_id: "GSM5032772"           # confirmed on GEO: "Sample 2_PASC_ZX-3"
-    tissue_ontology_term_id: "UBERON:0001264"   # pancreas
-    disease_ontology_term_id: "MONDO:0003450"   # adenosquamous carcinoma
+    gsm_id: "GSM5032772"
 
   - id: "normal"
     condition: "normal"
-    gsm_id: "GSM5032773"           # confirmed on GEO: "Sample 3_normal pancreas_ZX-4"
-    tissue_ontology_term_id: "UBERON:0001264"   # pancreas
-    disease_ontology_term_id: "PATO:0000461"    # normal
+    gsm_id: "GSM5032773"

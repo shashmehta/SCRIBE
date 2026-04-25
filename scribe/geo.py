@@ -1,4 +1,4 @@
-"""GEO dataset loading and conversion to cellxGene-compliant AnnData.
+"""GEO dataset loading and conversion to AnnData.
 
 GEO (Gene Expression Omnibus) is the public database where researchers deposit
 their sequencing data. Each study has a GSE accession (the whole dataset) and
@@ -23,7 +23,6 @@ import scanpy as sc
 import scipy.sparse as sp
 
 from scribe.config import (
-    CellxGeneConfig,
     DatasetConfig,
     FileConfig,
     PreprocessingConfig,
@@ -247,22 +246,19 @@ def load_tar_10x(tar_path: str) -> ad.AnnData:
 def assign_sample_metadata(
     adata: ad.AnnData,
     samples: list[SampleConfig],
-    dataset_tissue: str,
-    dataset_disease: str,
 ) -> ad.AnnData:
     """Map per-sample metadata onto obs columns.
 
     After loading, cells don't know which patient or condition they came from.
-    This function tags each cell with its sample ID, condition (e.g. "tumor"),
-    tissue, and disease using one of two strategies:
-      - barcode_suffix: the number at the end of a 10x barcode (e.g. "-1") identifies the sample
-      - gsm_id: the GSM accession already stored in obs['gsm_id'] identifies the sample
+    This function tags each cell with its sample ID and condition using one of
+    three strategies:
+      - barcode_prefix: the part before ":" in "SAMPLE:INDEX" barcodes (e.g. "P03")
+      - barcode_suffix: the number at the end of a 10x barcode (e.g. "-1")
+      - gsm_id: the GSM accession already stored in obs['gsm_id']
 
     Args:
         adata: AnnData to annotate.
         samples: List of SampleConfig entries from the dataset YAML.
-        dataset_tissue: Default tissue ontology term (used if no per-sample override).
-        dataset_disease: Default disease ontology term (used if no per-sample override).
 
     Returns:
         The annotated AnnData.
@@ -272,71 +268,43 @@ def assign_sample_metadata(
         return adata
 
     n = adata.n_obs
+    sample_arr    = np.full(n, "unknown", dtype=object)
+    condition_arr = np.full(n, "unknown", dtype=object)
 
-    # Build plain numpy arrays for each annotation column.
-    # We use positional arrays (indexed by position, not by barcode name) to
-    # avoid problems when multiple cells share the same barcode after concatenation.
-    sample_arr    = np.full(n, "unknown",       dtype=object)
-    condition_arr = np.full(n, "unknown",       dtype=object)
-    tissue_arr    = np.full(n, dataset_tissue,  dtype=object)  # start with dataset default
-    disease_arr   = np.full(n, dataset_disease, dtype=object)  # start with dataset default
-
-    # Check which demultiplexing strategy the YAML config uses
     use_suffix = any(s.barcode_suffix is not None for s in samples)
     use_prefix = any(s.barcode_prefix is not None for s in samples)
     use_gsm    = any(s.gsm_id is not None for s in samples)
 
     if use_prefix:
-        # Build a lookup: prefix string → SampleConfig
-        # Barcodes are in "PREFIX:INDEX" format (e.g. "P03:1") — the prefix identifies the sample
         prefix_map = {s.barcode_prefix: s for s in samples if s.barcode_prefix is not None}
         obs_prefixes = np.array([
             bc.split(":")[0] if ":" in bc else "" for bc in adata.obs_names
         ])
         for prefix, s in prefix_map.items():
-            mask = obs_prefixes == prefix  # True for every cell from this sample
+            mask = obs_prefixes == prefix
             sample_arr[mask]    = s.id
             condition_arr[mask] = s.condition
-            if s.tissue_ontology_term_id:
-                tissue_arr[mask]  = s.tissue_ontology_term_id
-            if s.disease_ontology_term_id:
-                disease_arr[mask] = s.disease_ontology_term_id
 
     elif use_suffix:
-        # Build a lookup: suffix string → SampleConfig
         suffix_map = {s.barcode_suffix: s for s in samples if s.barcode_suffix is not None}
-        # Extract the part after the last "-" in each barcode (e.g. "ACGT001-1" → "1")
         obs_suffixes = np.array([
             bc.split("-")[-1] if "-" in bc else "" for bc in adata.obs_names
         ])
         for suffix, s in suffix_map.items():
-            mask = obs_suffixes == suffix  # True for every cell that belongs to this sample
+            mask = obs_suffixes == suffix
             sample_arr[mask]    = s.id
             condition_arr[mask] = s.condition
-            if s.tissue_ontology_term_id:
-                tissue_arr[mask]  = s.tissue_ontology_term_id   # per-sample tissue override
-            if s.disease_ontology_term_id:
-                disease_arr[mask] = s.disease_ontology_term_id  # per-sample disease override
 
     elif use_gsm and "gsm_id" in adata.obs.columns:
-        # Build a lookup: GSM accession string → SampleConfig
         gsm_map = {s.gsm_id: s for s in samples if s.gsm_id is not None}
-        obs_gsm = adata.obs["gsm_id"].to_numpy(dtype=str)  # array of GSM IDs, one per cell
+        obs_gsm = adata.obs["gsm_id"].to_numpy(dtype=str)
         for gsm_id_val, s in gsm_map.items():
-            mask = obs_gsm == gsm_id_val  # True for every cell from this GSM sample
+            mask = obs_gsm == gsm_id_val
             sample_arr[mask]    = s.id
             condition_arr[mask] = s.condition
-            if s.tissue_ontology_term_id:
-                tissue_arr[mask]  = s.tissue_ontology_term_id
-            if s.disease_ontology_term_id:
-                disease_arr[mask] = s.disease_ontology_term_id
 
-    # Write the arrays back into the AnnData observation table
-    adata.obs["sample"]                   = sample_arr
-    adata.obs["condition"]                = condition_arr
-    adata.obs["tissue_ontology_term_id"]  = tissue_arr
-    adata.obs["disease_ontology_term_id"] = disease_arr
-    adata.obs["donor_id"]                 = sample_arr  # donor = sample for single-patient studies
+    adata.obs["sample"]    = sample_arr
+    adata.obs["condition"] = condition_arr
 
     print("  Sample assignment summary:")
     for val, count in adata.obs["sample"].value_counts().items():
@@ -469,129 +437,14 @@ def preprocess_adata(adata: ad.AnnData, config: PreprocessingConfig, skip_scale:
     return adata
 
 
-# ── cellxGene annotation & validation ────────────────────────────────────────
-
-def annotate_cellxgene_metadata(
-    adata: ad.AnnData, config: CellxGeneConfig, title: str
-) -> ad.AnnData:
-    """Add required cellxGene schema 5.0.0 fields to obs, var, and uns.
-
-    cellxGene is the Chan Zuckerberg Initiative's single-cell browser. To upload
-    a dataset it must have specific metadata columns with standardised ontology
-    IDs. Per-cell overrides from assign_sample_metadata() take precedence.
-
-    Args:
-        adata: AnnData to annotate.
-        config: CellxGeneConfig with ontology term IDs.
-        title: Dataset title stored in uns['title'].
-
-    Returns:
-        The annotated AnnData.
-    """
-    # Only set obs fields if they weren't already set per-cell by assign_sample_metadata
-    if "organism_ontology_term_id" not in adata.obs.columns:
-        adata.obs["organism_ontology_term_id"] = config.organism_ontology_term_id
-    if "assay_ontology_term_id" not in adata.obs.columns:
-        adata.obs["assay_ontology_term_id"] = config.assay_ontology_term_id
-    if "tissue_ontology_term_id" not in adata.obs.columns:
-        adata.obs["tissue_ontology_term_id"] = config.tissue_ontology_term_id
-    if "disease_ontology_term_id" not in adata.obs.columns:
-        adata.obs["disease_ontology_term_id"] = config.disease_ontology_term_id
-
-    # Fill in remaining required fields with "unknown" if not already present
-    for col, default in [
-        ("cell_type_ontology_term_id", "unknown"),  # we haven't done cell-type annotation yet
-        ("donor_id", "unknown"),
-        ("suspension_type", "cell"),                # "cell" means single-cell (not nucleus)
-        ("sex_ontology_term_id", "unknown"),
-        ("development_stage_ontology_term_id", "unknown"),
-        ("self_reported_ethnicity_ontology_term_id", "unknown"),
-    ]:
-        if col not in adata.obs.columns:
-            adata.obs[col] = default
-
-    if "is_primary_data" not in adata.obs.columns:
-        adata.obs["is_primary_data"] = True  # this is original data, not a reanalysis
-
-    # var fields describe each gene (feature)
-    if "feature_is_filtered" not in adata.var.columns:
-        adata.var["feature_is_filtered"] = False   # none of our HVGs were manually filtered
-    if "feature_name" not in adata.var.columns:
-        adata.var["feature_name"] = adata.var_names  # gene symbol, e.g. "TP53"
-    if "feature_biotype" not in adata.var.columns:
-        adata.var["feature_biotype"] = "gene"
-
-    # uns (unstructured metadata) holds dataset-level information
-    adata.uns["schema_version"] = "5.0.0"
-    adata.uns["title"] = title
-    if "X_umap" in adata.obsm:
-        adata.uns["default_embedding"] = "X_umap"  # tell cellxGene which plot to show by default
-
-    return adata
-
-
-def validate_cellxgene(adata: ad.AnnData, name: str = "dataset") -> bool:
-    """Check that all required cellxGene schema 5.0.0 fields are present.
-
-    Args:
-        adata: AnnData to validate.
-        name: Label used in printed output.
-
-    Returns:
-        True if all required fields are present, False otherwise.
-    """
-    issues = []  # collect all problems before reporting them
-
-    # Every cell (obs row) must have these columns
-    required_obs = [
-        "organism_ontology_term_id",
-        "tissue_ontology_term_id",
-        "assay_ontology_term_id",
-        "disease_ontology_term_id",
-        "cell_type_ontology_term_id",
-        "donor_id",
-        "suspension_type",
-        "is_primary_data",
-        "sex_ontology_term_id",
-        "development_stage_ontology_term_id",
-        "self_reported_ethnicity_ontology_term_id",
-    ]
-    for col in required_obs:
-        if col not in adata.obs.columns:
-            issues.append(f"Missing obs column: {col}")
-
-    # Every gene (var row) must have these columns
-    for col in ["feature_is_filtered", "feature_name", "feature_biotype"]:
-        if col not in adata.var.columns:
-            issues.append(f"Missing var column: {col}")
-
-    # Dataset-level metadata must be present
-    for key in ["schema_version", "title"]:
-        if key not in adata.uns:
-            issues.append(f"Missing uns key: {key}")
-
-    # cellxGene needs a UMAP embedding to display cells as a scatter plot
-    if "X_umap" not in adata.obsm:
-        issues.append("Missing obsm embedding: X_umap")
-
-    if issues:
-        print(f"VALIDATION FAILED for {name}:")
-        for issue in issues:
-            print(f"  - {issue}")
-        return False
-
-    print(f"VALIDATION PASSED for {name}: {adata.n_obs} cells × {adata.n_vars} genes")
-    return True
 
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
 def convert_dataset(config: DatasetConfig, output_dir: str, skip_scale: bool = False, skip_hvg: bool = False, skip_embeddings: bool = False) -> str:
-    """Load, preprocess, annotate, validate, and save a GEO dataset as .h5ad.
+    """Load, preprocess, and save a GEO dataset as .h5ad.
 
-    This is the main function called by `python run.py convert`. It runs all
-    the steps in order and saves the result as an HDF5-backed AnnData file
-    (.h5ad) that can be uploaded to cellxGene or used for ML training.
+    Runs all steps in order and saves the result as an HDF5-backed AnnData file.
 
     Args:
         config: Populated DatasetConfig from a dataset YAML file.
@@ -601,7 +454,7 @@ def convert_dataset(config: DatasetConfig, output_dir: str, skip_scale: bool = F
         Path to the written .h5ad file.
 
     Raises:
-        ValueError: If the file format is unrecognised or validation fails.
+        ValueError: If the file format is unrecognised.
     """
     os.makedirs(output_dir, exist_ok=True)
     base = config.source.base_path  # root directory where raw files live
@@ -625,30 +478,13 @@ def convert_dataset(config: DatasetConfig, output_dir: str, skip_scale: bool = F
     else:
         raise ValueError(f"Unknown file format: {file_cfg.format!r}")
 
-    # Step 2 — label each cell with its sample, condition, tissue, and disease
-    adata = assign_sample_metadata(
-        adata,
-        config.samples,
-        dataset_tissue=config.cellxgene.tissue_ontology_term_id,
-        dataset_disease=config.cellxgene.disease_ontology_term_id,
-    )
+    # Step 2 — label each cell with its sample and condition
+    adata = assign_sample_metadata(adata, config.samples)
 
     # Step 3 — run QC, normalisation, HVG selection, PCA, UMAP, and clustering
     adata = preprocess_adata(adata, config.preprocessing, skip_scale=skip_scale, skip_hvg=skip_hvg, skip_embeddings=skip_embeddings)
 
-    # Step 4 — add the metadata columns required by the cellxGene schema
-    adata = annotate_cellxgene_metadata(adata, config.cellxgene, title=config.title)
-
-    # Step 5 — confirm all required fields are present before saving.
-    # Skip validation when embeddings are absent (build pipeline defers them to merge).
-    if not skip_embeddings:
-        ok = validate_cellxgene(adata, name=config.id)
-        if not ok:
-            raise ValueError(f"cellxGene validation failed for {config.id}")
-    else:
-        print(f"  Skipping cellxGene validation (embeddings deferred to merge step)")
-
-    # Step 6 — write the processed AnnData to disk as an .h5ad file
+    # Step 4 — write the processed AnnData to disk as an .h5ad file
     out_path = os.path.join(output_dir, f"{config.id}_processed.h5ad")
     adata.write_h5ad(out_path)
     size_mb = os.path.getsize(out_path) / 1e6
