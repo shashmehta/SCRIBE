@@ -25,22 +25,70 @@ def _():
 @app.cell
 def _(mo):
     mo.md("""
-    # SCRIBE — ML Framework for Biomarker Discovery
+    # SCRIBE — Single-Cell RNA Interpretable Biomarker Explorer
 
-    Explore batch correction effects through interactive UMAP, PCA, and gene
-    expression viewers. Compares **Uncorrected** vs **ComBat** vs **Harmony**.
+    **SCRIBE** is a machine learning pipeline for identifying biomarkers and therapeutic
+    targets from single-cell RNA sequencing (scRNA-seq) data. Using an explainable
+    Random Forest classifier on pancreatic cancer datasets, it ranks genes that
+    discriminate between normal, precancerous, and malignant cell states — and
+    applies batch correction to disentangle technical from biological variation.
+
+    | Dataset | Cells | Condition |
+    |---|---|---|
+    | GSE154778 | 14,924 | Malignant (PDAC — primary & metastatic) |
+    | GSE162708 | 21,938 | Normal + Malignant (neuroendocrine tumor) |
+    | GSE165399 | 9,071 | Normal + Precancerous + Malignant |
+
+    **45,933 cells × 3,004 genes** after batch-aware highly variable gene selection.
+    Batch effects were corrected using **ComBat** and **Harmony**, and a three-class
+    Random Forest (normal / precancerous / malignant) was trained to identify the most
+    discriminating genes per condition.
     """)
     return
 
 
 @app.cell
 def _(mo):
+    import base64
+    from pathlib import Path as _Path
+
+    _poster = _Path("web/assets/poster.png")
+    if _poster.exists():
+        _data = base64.b64encode(_poster.read_bytes()).decode()
+        mo.Html(
+            f'<img src="data:image/png;base64,{_data}" '
+            f'style="width:100%;border-radius:8px;margin:1rem 0;" '
+            f'alt="SCRIBE research poster"/>'
+        )
+    else:
+        mo.md("*Poster image not found — add your poster PNG at `web/assets/poster.png`.*")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
+    ## Interactive Batch Correction Analysis
+
+    Explore the batch correction results below. Use the **UMAP viewer** to see how
+    ComBat and Harmony reduce dataset-driven clustering, the **HK Gene PCA** to
+    assess correction quality on housekeeping genes, and the **Plot Gallery** to
+    browse pre-rendered analysis figures.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    import os
     from scribe import cache
 
-    if cache.is_cache_stale():
-        mo.output.append(mo.md("**Cache is stale — rebuilding from h5ad files...**"))
-        cache.build_cache()
-        mo.output.append(mo.md("Cache rebuilt."))
+    if not os.environ.get("SCRIBE_READ_ONLY"):
+        if cache.is_cache_stale():
+            mo.output.append(mo.md("**Cache is stale — rebuilding from h5ad files...**"))
+            cache.build_cache()
+            mo.output.append(mo.md("Cache rebuilt."))
 
     gene_list = cache.get_gene_list()
     obs = cache.load_obs_metadata()

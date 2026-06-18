@@ -1,3 +1,12 @@
+---
+title: SCRIBE Biomarker Explorer
+emoji: 🔬
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+---
+
 # SCRIBE
 ### Single-Cell RNA Interpretable Biomarker Explorer
 
@@ -82,7 +91,7 @@ Download and install [Google Drive for Desktop](https://www.google.com/drive/dow
 
 ### Step 2 — Create the SCRIBE folder on Drive
 
-Create a folder named `SCRIBE` on Google Drive with the following structure (or get access to the shared folder):
+Create a folder named `SCRIBE` on Google Drive with the following structure:
 
 ```
 SCRIBE/                                    (Google Drive folder)
