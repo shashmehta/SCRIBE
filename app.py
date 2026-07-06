@@ -111,13 +111,19 @@ def _(mo):
 
 
 @app.cell
-def _(gene_list, mo):
+def _(cache, gene_list, mo):
     from scribe.batch import DEFAULT_HOUSEKEEPING_GENES
 
     available_hk = [g for g in DEFAULT_HOUSEKEEPING_GENES if g in gene_list]
 
+    # The full per-gene expression matrices are Drive-only and absent from the
+    # deployment. When they're missing, restrict the selector to the bundled
+    # housekeeping genes so selecting a gene never triggers a missing-file error.
+    _full_expr = cache.has_full_expression_cache()
+    _options = sorted(gene_list) if _full_expr else available_hk
+
     gene_selector = mo.ui.multiselect(
-        options=sorted(gene_list),
+        options=_options,
         label="Select genes (max 10)",
         max_selections=10,
     )
@@ -128,6 +134,17 @@ def _(gene_list, mo):
         on_click=lambda _v: True,
     )
 
+    _note = (
+        f"*HK genes available: {', '.join(available_hk)}*"
+        if _full_expr
+        else (
+            "*This deployment bundles expression data for the "
+            f"{len(available_hk)} housekeeping genes only "
+            f"({', '.join(available_hk)}); the full matrix is too large to host. "
+            "Select from these to compare distributions across datasets.*"
+        )
+    )
+
     mo.vstack([
         mo.md("### Gene Distribution Viewer"),
         mo.md(
@@ -136,7 +153,7 @@ def _(gene_list, mo):
             "Harmony-corrected PCs (lossy — captures ~50% of variance)."
         ),
         mo.hstack([gene_selector, hk_button], justify="start", gap=1),
-        mo.md(f"*HK genes available: {', '.join(available_hk)}*"),
+        mo.md(_note),
     ])
     return available_hk, gene_selector, hk_button
 
