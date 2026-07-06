@@ -21,8 +21,5 @@ ENV SCRIBE_OUTPUT_DIR=/app/web
 # Skip cache staleness check — no h5ad source files in the container
 ENV SCRIBE_READ_ONLY=1
 
-# Pre-render default (grey) UMAP so the app skips matplotlib on startup
-RUN python -c "from scribe.cache import generate_default_umap_plot; generate_default_umap_plot()"
-
 EXPOSE 7860
 CMD ["marimo", "run", "app.py", "--host", "0.0.0.0", "--port", "7860", "--no-token"]
