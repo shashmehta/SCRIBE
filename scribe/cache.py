@@ -379,6 +379,69 @@ def get_gene_list() -> list[str]:
     return schema.names
 
 
+def load_hk_pca(method: str = "uncorrected") -> tuple[pd.DataFrame, tuple[float, float]]:
+    """Load pre-computed 2-component HK gene PCA coordinates and variance ratios."""
+    prefix = _method_prefix(method)
+    df = pd.read_parquet(_cache_path(f"{prefix}_hk_pca.parquet"), engine="pyarrow")
+    with open(_cache_path("hk_pca_meta.json")) as f:
+        meta = json.load(f)
+    return df, tuple(meta[method])
+
+
+def get_hk_genes_from_cache() -> list[str]:
+    """Return HK gene names used in PCA without loading expression data."""
+    with open(_cache_path("hk_pca_meta.json")) as f:
+        return json.load(f)["genes"]
+
+
+def generate_default_umap_plot(plots_dir: Path | None = None) -> Path:
+    """Pre-render the grey (no-annotation) UMAP panels as a PNG.
+
+    Called at Docker build time so the app skips matplotlib rendering on startup.
+    Reads from the Parquet cache — does NOT need h5ad files.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if plots_dir is None:
+        plots_dir = paths.get_plots_dir()
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    out_path = plots_dir / "umap_default.png"
+
+    umap_uncorr = load_umap_coords("uncorrected")
+    umap_combat = load_umap_coords("combat")
+    harmony_ok = has_harmony_cache()
+    umap_harmony = load_umap_coords("harmony") if harmony_ok else None
+
+    n_panels = 3 if harmony_ok else 2
+    titles = ["Uncorrected", "ComBat"] + (["Harmony"] if harmony_ok else [])
+    coords_list = [umap_uncorr, umap_combat] + ([umap_harmony] if harmony_ok else [])
+
+    rng = np.random.RandomState(42)
+    idx = rng.permutation(len(umap_uncorr))
+
+    fig, axes = plt.subplots(1, n_panels, figsize=(8 * n_panels, 6))
+    axes = list(axes) if n_panels > 1 else [axes]
+    for ax, title, coords in zip(axes, titles, coords_list):
+        ax.scatter(
+            coords["UMAP1"].values[idx], coords["UMAP2"].values[idx],
+            c="#cccccc", s=1, alpha=0.3, rasterized=True,
+        )
+        ax.set_title(title, fontsize=13)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel("UMAP1")
+        ax.set_ylabel("UMAP2")
+
+    fig.suptitle("UMAP", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 # ── Legacy wrappers (kept for backwards compat; prefer the method-based API) ─
 
 
