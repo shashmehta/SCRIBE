@@ -1,5 +1,8 @@
 FROM python:3.10-slim
 
+# g++ is required to compile annoy (a scanorama dependency) from source
+RUN apt-get update && apt-get install -y --no-install-recommends g++ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY pyproject.toml .
