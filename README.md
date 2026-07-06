@@ -12,6 +12,18 @@ pinned: false
 
 A Python machine learning pipeline for identifying biomarkers and therapeutic targets from single-cell RNA sequencing (scRNA-seq) data using explainable machine learning. SCRIBE converts raw GEO datasets, corrects batch effects, trains an interpretable Random Forest classifier, and generates publication-quality plots — all from a single CLI.
 
+---
+
+## Live Demo
+
+[![SCRIBE Research Poster](web/assets/poster.jpg)](https://shashMehta-SCRIBE.hf.space/)
+
+**[Try the interactive demo →](https://shashMehta-SCRIBE.hf.space/)**
+
+Explore batch correction methods side-by-side, visualize UMAP embeddings colored by cell type or condition, inspect housekeeping gene PCA, and query gene expression distributions — all in the browser, no installation required.
+
+---
+
 ## Overview
 
 SCRIBE uses Random Forest classification on gene expression data to:
