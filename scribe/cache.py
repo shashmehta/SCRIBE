@@ -75,6 +75,16 @@ _HARMONY_CACHE_FILES = [
     "harmony_obs_metadata.parquet",
 ]
 
+# Subset checked to decide if Harmony panels can be shown in the app.
+# harmony_expr.parquet (large Drive-only file) is excluded — the UMAP/HK/PCA
+# panels only need the local small files, which are bundled in the deployment.
+_HARMONY_LOCAL_FILES = [
+    "harmony_umap.parquet",
+    "harmony_hk_expr.parquet",
+    "harmony_obs_metadata.parquet",
+    "harmony_hk_pca.parquet",
+]
+
 
 def get_h5ad_paths() -> tuple[Path, Path, Path]:
     """Return (uncorrected, combat, harmony) h5ad paths."""
@@ -82,8 +92,18 @@ def get_h5ad_paths() -> tuple[Path, Path, Path]:
 
 
 def has_harmony_cache() -> bool:
-    """Check whether Harmony parquet files exist in the cache."""
-    return all(_cache_path(name).exists() for name in _HARMONY_CACHE_FILES)
+    """Check whether the Harmony local (small) parquet files exist in the cache."""
+    return all(_cache_path(name).exists() for name in _HARMONY_LOCAL_FILES)
+
+
+def has_full_expression_cache() -> bool:
+    """Whether the large per-gene expression matrices are present.
+
+    These are Drive-only files, absent from the HF Spaces deployment, so the
+    app restricts the gene distribution viewer to bundled housekeeping genes
+    when this returns False.
+    """
+    return _cache_path("uncorrected_expr.parquet").exists()
 
 
 def _file_fingerprint(path: Path) -> str:
@@ -208,9 +228,13 @@ def build_cache(force: bool = False) -> None:
     adata = sc.read_h5ad(str(uncorr_path))
     _score_cell_cycle(adata)
 
-    _dense_expr_df(adata).to_parquet(
+    expr_df = _dense_expr_df(adata)
+    expr_df.to_parquet(
         _cache_path("uncorrected_expr.parquet"), engine="pyarrow"
     )
+    # Small bundled gene-name list so get_gene_list() works without the parquet.
+    (local_dir / "gene_list.json").write_text(json.dumps(expr_df.columns.tolist()))
+    del expr_df
 
     obs_cols = ["dataset", "condition", "leiden", "phase", "sample"]
     adata.obs[obs_cols].copy().reset_index(drop=True).to_parquet(
@@ -372,11 +396,83 @@ def load_hk_expression(method: str = "uncorrected") -> pd.DataFrame:
 
 
 def get_gene_list() -> list[str]:
-    """Read gene names from the Parquet schema without loading expression data."""
+    """Return gene names, reading from a small bundled JSON when available.
+
+    Falls back to the large expression parquet's schema only if the JSON is
+    absent — the JSON lets the HF Spaces deployment work without the Drive-only
+    expression matrices.
+    """
+    gene_list_path = paths.get_local_cache_dir() / "gene_list.json"
+    if gene_list_path.exists():
+        return json.loads(gene_list_path.read_text())
+
     import pyarrow.parquet as pq
 
     schema = pq.read_schema(_cache_path("uncorrected_expr.parquet"))
     return schema.names
+
+
+def load_hk_pca(method: str = "uncorrected") -> tuple[pd.DataFrame, tuple[float, float]]:
+    """Load pre-computed 2-component HK gene PCA coordinates and variance ratios."""
+    prefix = _method_prefix(method)
+    df = pd.read_parquet(_cache_path(f"{prefix}_hk_pca.parquet"), engine="pyarrow")
+    with open(_cache_path("hk_pca_meta.json")) as f:
+        meta = json.load(f)
+    return df, tuple(meta[method])
+
+
+def get_hk_genes_from_cache() -> list[str]:
+    """Return HK gene names used in PCA without loading expression data."""
+    with open(_cache_path("hk_pca_meta.json")) as f:
+        return json.load(f)["genes"]
+
+
+def generate_default_umap_plot(plots_dir: Path | None = None) -> Path:
+    """Pre-render the grey (no-annotation) UMAP panels as a PNG.
+
+    Called at Docker build time so the app skips matplotlib rendering on startup.
+    Reads from the Parquet cache — does NOT need h5ad files.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if plots_dir is None:
+        plots_dir = paths.get_plots_dir()
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    out_path = plots_dir / "umap_default.png"
+
+    umap_uncorr = load_umap_coords("uncorrected")
+    umap_combat = load_umap_coords("combat")
+    harmony_ok = has_harmony_cache()
+    umap_harmony = load_umap_coords("harmony") if harmony_ok else None
+
+    n_panels = 3 if harmony_ok else 2
+    titles = ["Uncorrected", "ComBat"] + (["Harmony"] if harmony_ok else [])
+    coords_list = [umap_uncorr, umap_combat] + ([umap_harmony] if harmony_ok else [])
+
+    rng = np.random.RandomState(42)
+    idx = rng.permutation(len(umap_uncorr))
+
+    fig, axes = plt.subplots(1, n_panels, figsize=(8 * n_panels, 6))
+    axes = list(axes) if n_panels > 1 else [axes]
+    for ax, title, coords in zip(axes, titles, coords_list):
+        ax.scatter(
+            coords["UMAP1"].values[idx], coords["UMAP2"].values[idx],
+            c="#cccccc", s=1, alpha=0.3, rasterized=True,
+        )
+        ax.set_title(title, fontsize=13)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel("UMAP1")
+        ax.set_ylabel("UMAP2")
+
+    fig.suptitle("UMAP", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
 
 
 # ── Legacy wrappers (kept for backwards compat; prefer the method-based API) ─

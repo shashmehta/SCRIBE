@@ -12,35 +12,105 @@ def _():
 
 
 @app.cell
-def _():
+def _(mo):
     import matplotlib.pyplot as plt
     import seaborn as sns
     import pandas as pd
     import numpy as np
     from pathlib import Path
 
-    return Path, np, pd, plt, sns
+    def fig_to_html(fig):
+        """Render a matplotlib figure as a PNG <img> that keeps its aspect ratio.
+
+        mo.as_html() emits inline SVG that gets stretched to 100% width; embedding
+        a PNG with height:auto preserves the figure's true proportions.
+        """
+        import io
+        import base64
+
+        _buf = io.BytesIO()
+        fig.savefig(_buf, format="png", dpi=100, bbox_inches="tight")
+        plt.close(fig)
+        _data = base64.b64encode(_buf.getvalue()).decode()
+        return mo.Html(
+            f'<img src="data:image/png;base64,{_data}" '
+            f'style="max-width:100%;height:auto;display:block;margin:0 auto;"/>'
+        )
+
+    return Path, fig_to_html, np, pd, plt, sns
 
 
 @app.cell
 def _(mo):
     mo.md("""
-    # SCRIBE — ML Framework for Biomarker Discovery
+    # SCRIBE — Single-Cell RNA Interpretable Biomarker Explorer
 
-    Explore batch correction effects through interactive UMAP, PCA, and gene
-    expression viewers. Compares **Uncorrected** vs **ComBat** vs **Harmony**.
+    **SCRIBE** is a machine learning pipeline for identifying biomarkers and therapeutic
+    targets from single-cell RNA sequencing (scRNA-seq) data. Using an explainable
+    Random Forest classifier on pancreatic cancer datasets, it ranks genes that
+    discriminate between normal, precancerous, and malignant cell states — and
+    applies batch correction to disentangle technical from biological variation.
+
+    | Dataset | Cells | Condition |
+    |---|---|---|
+    | GSE154778 | 14,924 | Malignant (PDAC — primary & metastatic) |
+    | GSE162708 | 21,938 | Normal + Malignant (neuroendocrine tumor) |
+    | GSE165399 | 9,071 | Normal + Precancerous + Malignant |
+
+    **45,933 cells × 3,004 genes** after batch-aware highly variable gene selection.
+    Batch effects were corrected using **ComBat** and **Harmony**, and a three-class
+    Random Forest (normal / precancerous / malignant) was trained to identify the most
+    discriminating genes per condition.
     """)
     return
 
 
 @app.cell
 def _(mo):
+    import base64
+    import os as _os
+    from pathlib import Path as _Path
+
+    # Resolve relative to the app dir so it works regardless of marimo's CWD.
+    _app_dir = _Path(_os.environ.get("SCRIBE_APP_DIR", _os.getcwd()))
+    _poster = _app_dir / "web" / "assets" / "poster.jpg"
+    if _poster.exists():
+        _data = base64.b64encode(_poster.read_bytes()).decode()
+        _poster_out = mo.Html(
+            f'<img src="data:image/jpeg;base64,{_data}" '
+            f'style="width:100%;border-radius:8px;margin:1rem 0;" '
+            f'alt="SCRIBE research poster"/>'
+        )
+    else:
+        _poster_out = mo.md(f"*Poster not found — path: `{_poster}`*")
+    _poster_out
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
+    ## Interactive Batch Correction Analysis
+
+    Explore the batch correction results below. Use the **UMAP viewer** to see how
+    ComBat and Harmony reduce dataset-driven clustering, the **HK Gene PCA** to
+    assess correction quality on housekeeping genes, and the **Plot Gallery** to
+    browse pre-rendered analysis figures.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    import os
     from scribe import cache
 
-    if cache.is_cache_stale():
-        mo.output.append(mo.md("**Cache is stale — rebuilding from h5ad files...**"))
-        cache.build_cache()
-        mo.output.append(mo.md("Cache rebuilt."))
+    if not os.environ.get("SCRIBE_READ_ONLY"):
+        if cache.is_cache_stale():
+            mo.output.append(mo.md("**Cache is stale — rebuilding from h5ad files...**"))
+            cache.build_cache()
+            mo.output.append(mo.md("Cache rebuilt."))
 
     gene_list = cache.get_gene_list()
     obs = cache.load_obs_metadata()
@@ -63,13 +133,19 @@ def _(mo):
 
 
 @app.cell
-def _(gene_list, mo):
+def _(cache, gene_list, mo):
     from scribe.batch import DEFAULT_HOUSEKEEPING_GENES
 
     available_hk = [g for g in DEFAULT_HOUSEKEEPING_GENES if g in gene_list]
 
+    # The full per-gene expression matrices are Drive-only and absent from the
+    # deployment. When they're missing, restrict the selector to the bundled
+    # housekeeping genes so selecting a gene never triggers a missing-file error.
+    _full_expr = cache.has_full_expression_cache()
+    _options = sorted(gene_list) if _full_expr else available_hk
+
     gene_selector = mo.ui.multiselect(
-        options=sorted(gene_list),
+        options=_options,
         label="Select genes (max 10)",
         max_selections=10,
     )
@@ -80,6 +156,17 @@ def _(gene_list, mo):
         on_click=lambda _v: True,
     )
 
+    _note = (
+        f"*HK genes available: {', '.join(available_hk)}*"
+        if _full_expr
+        else (
+            "*This deployment bundles expression data for the "
+            f"{len(available_hk)} housekeeping genes only "
+            f"({', '.join(available_hk)}); the full matrix is too large to host. "
+            "Select from these to compare distributions across datasets.*"
+        )
+    )
+
     mo.vstack([
         mo.md("### Gene Distribution Viewer"),
         mo.md(
@@ -88,13 +175,13 @@ def _(gene_list, mo):
             "Harmony-corrected PCs (lossy — captures ~50% of variance)."
         ),
         mo.hstack([gene_selector, hk_button], justify="start", gap=1),
-        mo.md(f"*HK genes available: {', '.join(available_hk)}*"),
+        mo.md(_note),
     ])
     return available_hk, gene_selector, hk_button
 
 
 @app.cell
-def _(available_hk, cache, gene_selector, harmony_available, hk_button, mo, obs, plt, sns):
+def _(available_hk, cache, fig_to_html, gene_selector, harmony_available, hk_button, mo, obs, plt, sns):
     _COLORS = {"GSE154778": "#e41a1c", "GSE162708": "#377eb8", "GSE165399": "#4daf4a"}
 
     # Use HK genes if button was clicked, otherwise use multiselect
@@ -149,8 +236,7 @@ def _(available_hk, cache, gene_selector, harmony_available, hk_button, mo, obs,
                 _ax.set_xlabel("Expression")
                 _ax.legend(fontsize=8)
             plt.tight_layout()
-            plt.close(_fig)
-            _figures.append(mo.as_html(_fig))
+            _figures.append(fig_to_html(_fig))
 
         _output = mo.vstack(_figures)
 
@@ -202,6 +288,7 @@ def _(cache, harmony_available, mo):
 @app.cell
 def _(
     combat_obs,
+    fig_to_html,
     harmony_available,
     harmony_obs,
     mo,
@@ -213,91 +300,102 @@ def _(
     umap_harmony,
     umap_uncorr,
 ):
-    def _get_palette(categories):
-        cats = sorted(categories.unique())
-        _n = len(cats)
-        if _n <= 10:
-            _colors = plt.cm.tab10(np.linspace(0, 1, 10))[:_n]
-        elif _n <= 20:
-            _colors = plt.cm.tab20(np.linspace(0, 1, 20))[:_n]
-        else:
-            _colors = plt.cm.gist_ncar(np.linspace(0.05, 0.95, _n))
-        return {cat: _colors[i] for i, cat in enumerate(cats)}
-
-    _COL_MAP = {
-        "condition": "condition",
-        "dataset": "dataset",
-        "leiden": "leiden",
-        "cell cycle phase": "phase",
-        "sample": "sample",
-    }
+    import base64 as _b64
+    from pathlib import Path as _UmapPath
 
     _annotation = umap_annotation.value
-    _col = _COL_MAP.get(_annotation)
+    _default_png = _UmapPath("web/plots/umap_default.png")
 
-    _n_panels = 3 if harmony_available else 2
-    _width = 8 * _n_panels
-    _fig, _axes = plt.subplots(1, _n_panels, figsize=(_width, 6))
-    _axes = list(_axes)
-
-    _rng = np.random.RandomState(42)
-    _idx = _rng.permutation(len(umap_uncorr))
-
-    _panels = [
-        ("Uncorrected", umap_uncorr, obs),
-        ("ComBat", umap_combat, combat_obs),
-    ]
-    if harmony_available:
-        _panels.append(("Harmony", umap_harmony, harmony_obs))
-
-    if _col is None:
-        for _ax, (_title, _coords, _) in zip(_axes, _panels):
-            _ax.scatter(
-                _coords["UMAP1"].values[_idx], _coords["UMAP2"].values[_idx],
-                c="#cccccc", s=1, alpha=0.3, rasterized=True,
-            )
-    else:
-        _palette = _get_palette(obs[_col])
-
-        for _ax, (_title, _coords, _method_obs) in zip(_axes, _panels):
-            if _col in ("leiden", "phase"):
-                _labels = _method_obs[_col].values
+    def _render_umap():
+        def _get_palette(categories):
+            cats = sorted(categories.unique())
+            _n = len(cats)
+            if _n <= 10:
+                _colors = plt.cm.tab10(np.linspace(0, 1, 10))[:_n]
+            elif _n <= 20:
+                _colors = plt.cm.tab20(np.linspace(0, 1, 20))[:_n]
             else:
-                _labels = obs[_col].values
+                _colors = plt.cm.gist_ncar(np.linspace(0.05, 0.95, _n))
+            return {cat: _colors[i] for i, cat in enumerate(cats)}
 
-            for _cat in sorted(obs[_col].unique()):
-                _m = _labels[_idx] == _cat
+        _COL_MAP = {
+            "condition": "condition",
+            "dataset": "dataset",
+            "leiden": "leiden",
+            "cell cycle phase": "phase",
+            "sample": "sample",
+        }
+        _col = _COL_MAP.get(_annotation)
+
+        _n_panels = 3 if harmony_available else 2
+        _width = 8 * _n_panels
+        _fig, _axes = plt.subplots(1, _n_panels, figsize=(_width, 6))
+        _axes = list(_axes)
+
+        _rng = np.random.RandomState(42)
+        _idx = _rng.permutation(len(umap_uncorr))
+
+        _panels = [
+            ("Uncorrected", umap_uncorr, obs),
+            ("ComBat", umap_combat, combat_obs),
+        ]
+        if harmony_available:
+            _panels.append(("Harmony", umap_harmony, harmony_obs))
+
+        if _col is None:
+            for _ax, (_title, _coords, _) in zip(_axes, _panels):
                 _ax.scatter(
-                    _coords["UMAP1"].values[_idx][_m],
-                    _coords["UMAP2"].values[_idx][_m],
-                    c=[_palette[_cat]], s=1, alpha=0.5, label=_cat, rasterized=True,
+                    _coords["UMAP1"].values[_idx], _coords["UMAP2"].values[_idx],
+                    c="#cccccc", s=1, alpha=0.3, rasterized=True,
                 )
+        else:
+            _palette = _get_palette(obs[_col])
 
-        _n_cats = obs[_col].nunique()
-        for _ax in _axes:
-            if _n_cats <= 10:
-                _ax.legend(fontsize=8, markerscale=5, loc="best", frameon=True)
-            else:
-                _ax.legend(
-                    fontsize=6, markerscale=4, loc="center left",
-                    bbox_to_anchor=(1.01, 0.5), frameon=True, ncol=1,
-                )
+            for _ax, (_title, _coords, _method_obs) in zip(_axes, _panels):
+                if _col in ("leiden", "phase"):
+                    _labels = _method_obs[_col].values
+                else:
+                    _labels = obs[_col].values
 
-    for _ax, (_title, _, _) in zip(_axes, _panels):
-        _ax.set_title(_title, fontsize=13)
-        _ax.set_xticks([])
-        _ax.set_yticks([])
-        _ax.set_xlabel("UMAP1")
-        _ax.set_ylabel("UMAP2")
+                for _cat in sorted(obs[_col].unique()):
+                    _m = _labels[_idx] == _cat
+                    _ax.scatter(
+                        _coords["UMAP1"].values[_idx][_m],
+                        _coords["UMAP2"].values[_idx][_m],
+                        c=[_palette[_cat]], s=1, alpha=0.5, label=_cat, rasterized=True,
+                    )
 
-    _fig.suptitle(
-        f"UMAP — colored by {_annotation}" if _col else "UMAP",
-        fontsize=14, fontweight="bold",
-    )
-    plt.tight_layout()
-    plt.close(_fig)
+            _n_cats = obs[_col].nunique()
+            for _ax in _axes:
+                if _n_cats <= 10:
+                    _ax.legend(fontsize=8, markerscale=5, loc="best", frameon=True)
+                else:
+                    _ax.legend(
+                        fontsize=6, markerscale=4, loc="center left",
+                        bbox_to_anchor=(1.01, 0.5), frameon=True, ncol=1,
+                    )
 
-    mo.as_html(_fig)
+        for _ax, (_title, _, _) in zip(_axes, _panels):
+            _ax.set_title(_title, fontsize=13)
+            _ax.set_xticks([])
+            _ax.set_yticks([])
+            _ax.set_xlabel("UMAP1")
+            _ax.set_ylabel("UMAP2")
+
+        _fig.suptitle(
+            f"UMAP — colored by {_annotation}" if _col else "UMAP",
+            fontsize=14, fontweight="bold",
+        )
+        plt.tight_layout()
+        return fig_to_html(_fig)
+
+    if _annotation == "None" and _default_png.exists():
+        _umap_data = _b64.b64encode(_default_png.read_bytes()).decode()
+        _viz = mo.Html(f'<img src="data:image/png;base64,{_umap_data}" style="width:100%;"/>')
+    else:
+        _viz = _render_umap()
+
+    _viz
     return
 
 
@@ -305,32 +403,15 @@ def _(
 
 
 @app.cell
-def _(cache, harmony_available, mo, np, pd):
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.decomposition import PCA
-
-    hk_uncorr = cache.load_hk_expression(method="uncorrected")
-    hk_combat = cache.load_hk_expression(method="combat")
-    hk_harmony = (
-        cache.load_hk_expression(method="harmony") if harmony_available else None
-    )
-
-    def _compute_hk_pca(hk_df):
-        scaler = StandardScaler()
-        scaled = scaler.fit_transform(hk_df.values)
-        pca = PCA(n_components=2)
-        coords = pca.fit_transform(scaled)
-        df = pd.DataFrame(coords, columns=["PC1", "PC2"], dtype=np.float32)
-        return df, pca.explained_variance_ratio_
-
-    pca_uncorr, var_uncorr = _compute_hk_pca(hk_uncorr)
-    pca_combat, var_combat = _compute_hk_pca(hk_combat)
+def _(cache, harmony_available, mo):
+    pca_uncorr, var_uncorr = cache.load_hk_pca(method="uncorrected")
+    pca_combat, var_combat = cache.load_hk_pca(method="combat")
     if harmony_available:
-        pca_harmony, var_harmony = _compute_hk_pca(hk_harmony)
+        pca_harmony, var_harmony = cache.load_hk_pca(method="harmony")
     else:
         pca_harmony, var_harmony = None, None
 
-    hk_genes_used = list(hk_uncorr.columns)
+    hk_genes_used = cache.get_hk_genes_from_cache()
 
     pca_annotation = mo.ui.dropdown(
         options=["None", "condition", "dataset", "leiden", "cell cycle phase", "sample"],
@@ -362,6 +443,7 @@ def _(cache, harmony_available, mo, np, pd):
 @app.cell
 def _(
     combat_obs,
+    fig_to_html,
     harmony_available,
     harmony_obs,
     mo,
@@ -384,81 +466,88 @@ def _(
         "sample": "sample",
     }
 
-    def _get_palette(categories):
-        cats = sorted(categories.unique())
-        _n = len(cats)
-        if _n <= 10:
-            _colors = plt.cm.tab10(np.linspace(0, 1, 10))[:_n]
-        elif _n <= 20:
-            _colors = plt.cm.tab20(np.linspace(0, 1, 20))[:_n]
-        else:
-            _colors = plt.cm.gist_ncar(np.linspace(0.05, 0.95, _n))
-        return {cat: _colors[i] for i, cat in enumerate(cats)}
-
     _annotation = pca_annotation.value
-    _col = _COL_MAP.get(_annotation)
 
-    _n_panels = 3 if harmony_available else 2
-    _width = 8 * _n_panels
-    _fig, _axes = plt.subplots(1, _n_panels, figsize=(_width, 6))
-    _axes = list(_axes)
-
-    _rng = np.random.RandomState(42)
-    _idx = _rng.permutation(len(pca_uncorr))
-
-    _panels = [
-        ("Uncorrected", pca_uncorr, var_uncorr, obs),
-        ("ComBat", pca_combat, var_combat, combat_obs),
-    ]
-    if harmony_available:
-        _panels.append(("Harmony (reconstructed)", pca_harmony, var_harmony, harmony_obs))
-
-    if _col is None:
-        for _ax, (_title, _coords, _var, _) in zip(_axes, _panels):
-            _ax.scatter(
-                _coords["PC1"].values[_idx], _coords["PC2"].values[_idx],
-                c="#cccccc", s=1, alpha=0.3, rasterized=True,
-            )
-    else:
-        _palette = _get_palette(obs[_col])
-
-        for _ax, (_title, _coords, _var, _method_obs) in zip(_axes, _panels):
-            if _col in ("leiden", "phase"):
-                _labels = _method_obs[_col].values
+    def _render_hk_pca():
+        def _get_palette(categories):
+            cats = sorted(categories.unique())
+            _n = len(cats)
+            if _n <= 10:
+                _colors = plt.cm.tab10(np.linspace(0, 1, 10))[:_n]
+            elif _n <= 20:
+                _colors = plt.cm.tab20(np.linspace(0, 1, 20))[:_n]
             else:
-                _labels = obs[_col].values
+                _colors = plt.cm.gist_ncar(np.linspace(0.05, 0.95, _n))
+            return {cat: _colors[i] for i, cat in enumerate(cats)}
 
-            for _cat in sorted(obs[_col].unique()):
-                _m = _labels[_idx] == _cat
+        _col = _COL_MAP.get(_annotation)
+
+        _n_panels = 3 if harmony_available else 2
+        _width = 8 * _n_panels
+        _fig, _axes = plt.subplots(1, _n_panels, figsize=(_width, 6))
+        _axes = list(_axes)
+
+        _rng = np.random.RandomState(42)
+        _idx = _rng.permutation(len(pca_uncorr))
+
+        _panels = [
+            ("Uncorrected", pca_uncorr, var_uncorr, obs),
+            ("ComBat", pca_combat, var_combat, combat_obs),
+        ]
+        if harmony_available:
+            _panels.append(("Harmony (reconstructed)", pca_harmony, var_harmony, harmony_obs))
+
+        if _col is None:
+            for _ax, (_title, _coords, _var, _) in zip(_axes, _panels):
                 _ax.scatter(
-                    _coords["PC1"].values[_idx][_m],
-                    _coords["PC2"].values[_idx][_m],
-                    c=[_palette[_cat]], s=1, alpha=0.5, label=_cat, rasterized=True,
+                    _coords["PC1"].values[_idx], _coords["PC2"].values[_idx],
+                    c="#cccccc", s=1, alpha=0.3, rasterized=True,
                 )
+        else:
+            _palette = _get_palette(obs[_col])
 
-        _n_cats = obs[_col].nunique()
-        for _ax in _axes:
-            if _n_cats <= 10:
-                _ax.legend(fontsize=8, markerscale=5, loc="best", frameon=True)
-            else:
-                _ax.legend(
-                    fontsize=6, markerscale=4, loc="center left",
-                    bbox_to_anchor=(1.01, 0.5), frameon=True, ncol=1,
-                )
+            for _ax, (_title, _coords, _var, _method_obs) in zip(_axes, _panels):
+                if _col in ("leiden", "phase"):
+                    _labels = _method_obs[_col].values
+                else:
+                    _labels = obs[_col].values
 
-    for _ax, (_title, _, _var, _) in zip(_axes, _panels):
-        _ax.set_title(_title, fontsize=13)
-        _ax.set_xlabel(f"PC1 ({_var[0]*100:.1f}%)")
-        _ax.set_ylabel(f"PC2 ({_var[1]*100:.1f}%)")
+                for _cat in sorted(obs[_col].unique()):
+                    _m = _labels[_idx] == _cat
+                    _ax.scatter(
+                        _coords["PC1"].values[_idx][_m],
+                        _coords["PC2"].values[_idx][_m],
+                        c=[_palette[_cat]], s=1, alpha=0.5, label=_cat, rasterized=True,
+                    )
 
-    _fig.suptitle(
-        f"HK Gene PCA — colored by {_annotation}" if _col else "HK Gene PCA",
-        fontsize=14, fontweight="bold",
-    )
-    plt.tight_layout()
-    plt.close(_fig)
+            _n_cats = obs[_col].nunique()
+            for _ax in _axes:
+                if _n_cats <= 10:
+                    _ax.legend(fontsize=8, markerscale=5, loc="best", frameon=True)
+                else:
+                    _ax.legend(
+                        fontsize=6, markerscale=4, loc="center left",
+                        bbox_to_anchor=(1.01, 0.5), frameon=True, ncol=1,
+                    )
 
-    mo.as_html(_fig)
+        for _ax, (_title, _, _var, _) in zip(_axes, _panels):
+            _ax.set_title(_title, fontsize=13)
+            _ax.set_xlabel(f"PC1 ({_var[0]*100:.1f}%)")
+            _ax.set_ylabel(f"PC2 ({_var[1]*100:.1f}%)")
+
+        _fig.suptitle(
+            f"HK Gene PCA — colored by {_annotation}" if _COL_MAP.get(_annotation) else "HK Gene PCA",
+            fontsize=14, fontweight="bold",
+        )
+        plt.tight_layout()
+        return fig_to_html(_fig)
+
+    if _annotation == "None":
+        _viz = mo.lazy(_render_hk_pca, show_loading_indicator=True)
+    else:
+        _viz = _render_hk_pca()
+
+    _viz
     return
 
 
