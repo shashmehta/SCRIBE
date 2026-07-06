@@ -921,7 +921,7 @@ def batch_correct(data_path, method, output, batch_key):
         plotting.plot_batch_correction_comparison(umaps_dict, batch_key, save_dir=output)
 
         # If multiple methods, generate comparison table
-        if len(corrections) > 1 or True:
+        if len(corrections) > 1:
             click.echo("\n=== Method Comparison ===")
             comparison = cellbatch.compare_corrections(adata, corrections, batch_key)
             click.echo(comparison.to_string())
@@ -1452,12 +1452,12 @@ def dataset_umap(data, dataset_name, output):
 )
 @click.option(
     "--combat", "combat_path", default=None,
-    type=click.Path(exists=False, dir_okay=False),
+    type=click.Path(exists=True, dir_okay=False),
     help="Path to ComBat-corrected .h5ad (optional).",
 )
 @click.option(
     "--harmony", "harmony_path", default=None,
-    type=click.Path(exists=False, dir_okay=False),
+    type=click.Path(exists=True, dir_okay=False),
     help="Path to Harmony-corrected .h5ad (optional).",
 )
 @click.option(

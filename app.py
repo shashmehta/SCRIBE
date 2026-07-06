@@ -301,10 +301,12 @@ def _(
     umap_uncorr,
 ):
     import base64 as _b64
+    import os as _umap_os
     from pathlib import Path as _UmapPath
 
     _annotation = umap_annotation.value
-    _default_png = _UmapPath("web/plots/umap_default.png")
+    _app_dir = _UmapPath(_umap_os.environ.get("SCRIBE_APP_DIR", _umap_os.getcwd()))
+    _default_png = _app_dir / "web" / "plots" / "umap_default.png"
 
     def _render_umap():
         def _get_palette(categories):
@@ -609,7 +611,7 @@ def _(Path, gallery_dropdown, mo, plot_options):
 def _(mo):
     mo.md("""
     ---
-    *SCRIBE Batch Correction Explorer — data from Google Drive*
+    *SCRIBE — Single-Cell RNA Interpretable Biomarker Explorer*
     """)
     return
 
