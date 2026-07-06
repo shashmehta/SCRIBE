@@ -18,6 +18,9 @@ RUN mkdir -p /root/.scribe && ln -s /app/web/cache /root/.scribe/cache
 # Point SCRIBE_OUTPUT_DIR to web/ so output/plots/ resolves to /app/web/plots/
 ENV SCRIBE_OUTPUT_DIR=/app/web
 
+# App dir for resolving bundled assets (poster) regardless of marimo's CWD
+ENV SCRIBE_APP_DIR=/app
+
 # Skip cache staleness check — no h5ad source files in the container
 ENV SCRIBE_READ_ONLY=1
 

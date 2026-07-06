@@ -12,14 +12,32 @@ def _():
 
 
 @app.cell
-def _():
+def _(mo):
     import matplotlib.pyplot as plt
     import seaborn as sns
     import pandas as pd
     import numpy as np
     from pathlib import Path
 
-    return Path, np, pd, plt, sns
+    def fig_to_html(fig):
+        """Render a matplotlib figure as a PNG <img> that keeps its aspect ratio.
+
+        mo.as_html() emits inline SVG that gets stretched to 100% width; embedding
+        a PNG with height:auto preserves the figure's true proportions.
+        """
+        import io
+        import base64
+
+        _buf = io.BytesIO()
+        fig.savefig(_buf, format="png", dpi=100, bbox_inches="tight")
+        plt.close(fig)
+        _data = base64.b64encode(_buf.getvalue()).decode()
+        return mo.Html(
+            f'<img src="data:image/png;base64,{_data}" '
+            f'style="max-width:100%;height:auto;display:block;margin:0 auto;"/>'
+        )
+
+    return Path, fig_to_html, np, pd, plt, sns
 
 
 @app.cell
@@ -50,18 +68,22 @@ def _(mo):
 @app.cell
 def _(mo):
     import base64
+    import os as _os
     from pathlib import Path as _Path
 
-    _poster = _Path("web/assets/poster.jpg")
+    # Resolve relative to the app dir so it works regardless of marimo's CWD.
+    _app_dir = _Path(_os.environ.get("SCRIBE_APP_DIR", _os.getcwd()))
+    _poster = _app_dir / "web" / "assets" / "poster.jpg"
     if _poster.exists():
         _data = base64.b64encode(_poster.read_bytes()).decode()
-        mo.Html(
+        _poster_out = mo.Html(
             f'<img src="data:image/jpeg;base64,{_data}" '
             f'style="width:100%;border-radius:8px;margin:1rem 0;" '
             f'alt="SCRIBE research poster"/>'
         )
     else:
-        mo.md("*Poster image not found — add your poster JPEG at `web/assets/poster.jpg`.*")
+        _poster_out = mo.md(f"*Poster not found — path: `{_poster}`*")
+    _poster_out
     return
 
 
@@ -159,7 +181,7 @@ def _(cache, gene_list, mo):
 
 
 @app.cell
-def _(available_hk, cache, gene_selector, harmony_available, hk_button, mo, obs, plt, sns):
+def _(available_hk, cache, fig_to_html, gene_selector, harmony_available, hk_button, mo, obs, plt, sns):
     _COLORS = {"GSE154778": "#e41a1c", "GSE162708": "#377eb8", "GSE165399": "#4daf4a"}
 
     # Use HK genes if button was clicked, otherwise use multiselect
@@ -214,8 +236,7 @@ def _(available_hk, cache, gene_selector, harmony_available, hk_button, mo, obs,
                 _ax.set_xlabel("Expression")
                 _ax.legend(fontsize=8)
             plt.tight_layout()
-            plt.close(_fig)
-            _figures.append(mo.as_html(_fig))
+            _figures.append(fig_to_html(_fig))
 
         _output = mo.vstack(_figures)
 
@@ -267,6 +288,7 @@ def _(cache, harmony_available, mo):
 @app.cell
 def _(
     combat_obs,
+    fig_to_html,
     harmony_available,
     harmony_obs,
     mo,
@@ -365,8 +387,7 @@ def _(
             fontsize=14, fontweight="bold",
         )
         plt.tight_layout()
-        plt.close(_fig)
-        return mo.as_html(_fig)
+        return fig_to_html(_fig)
 
     if _annotation == "None" and _default_png.exists():
         _umap_data = _b64.b64encode(_default_png.read_bytes()).decode()
@@ -422,6 +443,7 @@ def _(cache, harmony_available, mo):
 @app.cell
 def _(
     combat_obs,
+    fig_to_html,
     harmony_available,
     harmony_obs,
     mo,
@@ -518,8 +540,7 @@ def _(
             fontsize=14, fontweight="bold",
         )
         plt.tight_layout()
-        plt.close(_fig)
-        return mo.as_html(_fig)
+        return fig_to_html(_fig)
 
     if _annotation == "None":
         _viz = mo.lazy(_render_hk_pca, show_loading_indicator=True)
