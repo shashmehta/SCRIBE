@@ -1,12 +1,3 @@
----
-title: SCRIBE Biomarker Explorer
-emoji: 🔬
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-pinned: false
----
-
 # SCRIBE
 ### Single-Cell RNA Interpretable Biomarker Explorer
 
